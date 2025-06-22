@@ -16,7 +16,6 @@ const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
-    strict: true,
     deprecationErrors: true,
   },
 });
@@ -26,6 +25,7 @@ let toolsStorage;
 let usersStorage;
 let flaggedMessagesStorage;
 let sessionsStorage;
+let redirectTrackingStorage;
 async function run() {
   try {
     await client.connect();
@@ -37,6 +37,7 @@ async function run() {
     usersStorage = client.db('Toolmate').collection('Users');
     flaggedMessagesStorage = client.db('Toolmate').collection('FlaggedMessages');
     sessionsStorage = client.db('Toolmate').collection('Sessions');
+    redirectTrackingStorage = client.db('Toolmate').collection('RedirectTracking');
     app.listen(PORT, () => {
       console.log(`🚀 Server is running on port ${PORT}`);
     });
@@ -455,6 +456,141 @@ app.get('/admin/sessions/:id', async (req, res) => {
   } catch (error) {
     console.error('Error fetching session:', error);
     res.status(500).json({ error: 'Failed to fetch session' });
+  }
+});
+// Get admin analytics
+app.get('/admin/analytics', async (req, res) => {
+  try {
+    const { period = '7d' } = req.query;
+    // Calculate date range
+    const now = new Date();
+    const startDate = new Date();
+    switch (period) {
+      case '24h':
+        startDate.setHours(startDate.getHours() - 24);
+        break;
+      case '7d':
+        startDate.setDate(startDate.getDate() - 7);
+        break;
+      case '30d':
+        startDate.setDate(startDate.getDate() - 30);
+        break;
+      default:
+        startDate.setDate(startDate.getDate() - 7);
+    }
+
+    // Most flagged tools this week
+    const mostFlaggedTools = await flaggedMessagesStorage
+      .aggregate([
+        {
+          $match: {
+            flaggedAt: { $gte: startDate },
+          },
+        },
+        {
+          $lookup: {
+            from: 'Sessions',
+            localField: 'messageId',
+            foreignField: 'messages.id',
+            as: 'session',
+          },
+        },
+        {
+          $unwind: { path: '$session', preserveNullAndEmptyArrays: true },
+        },
+        {
+          $unwind: { path: '$session.suggestedTools', preserveNullAndEmptyArrays: true },
+        },
+        {
+          $group: {
+            _id: '$session.suggestedTools.name',
+            flagCount: { $sum: 1 },
+          },
+        },
+        { $sort: { flagCount: -1 } },
+        { $limit: 10 },
+      ])
+      .toArray();
+
+    // Flag count by reason type
+    const flagsByReason = await flaggedMessagesStorage
+      .aggregate([
+        {
+          $match: {
+            flaggedAt: { $gte: startDate },
+          },
+        },
+        {
+          $unwind: '$reasons',
+        },
+        {
+          $group: {
+            _id: '$reasons',
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { count: -1 } },
+      ])
+      .toArray();
+
+    const allToolsWithFlags = await flaggedMessagesStorage.distinct('messageId');
+    const toolsWithNoFlags = await toolsStorage
+      .aggregate([
+        {
+          $match: {
+            'suggestedTools.id': { $nin: allToolsWithFlags },
+          },
+        },
+        {
+          $unwind: '$suggestedTools',
+        },
+        {
+          $group: {
+            _id: '$suggestedTools.products.name',
+            count: { $sum: 1 },
+          },
+        },
+      ])
+      .toArray();
+
+    // General statistics
+    const totalSessions = await sessionsStorage.countDocuments({
+      timestamp: { $gte: startDate },
+    });
+
+    const totalFlags = await flaggedMessagesStorage.countDocuments({
+      flaggedAt: { $gte: startDate },
+    });
+
+    const totalRedirects = await redirectTrackingStorage.countDocuments({
+      timestamp: { $gte: startDate },
+    });
+
+    const totalUsers = await usersStorage.countDocuments({
+      createdAt: { $gte: startDate },
+    });
+
+    const subscribedUsers = await usersStorage.countDocuments({
+      isSubscribed: true,
+      createdAt: { $gte: startDate },
+    });
+
+    res.json({
+      period,
+      dateRange: { start: startDate, end: now },
+      statistics: {
+        totalSessions,
+        totalFlags,
+        totalUsers,
+        subscribedUsers,
+      },
+      mostFlaggedTools,
+      flagsByReason,
+      toolsWithNoFlags: toolsWithNoFlags.slice(0, 10),
+    });
+  } catch (error) {
+    console.error('Error fetching analytics:', error);
+    res.status(500).json({ error: 'Failed to fetch analytics' });
   }
 });
 // //openai content
