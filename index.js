@@ -460,6 +460,74 @@ app.get('/admin/sessions/:id', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch session' });
   }
 });
+// Track redirect clicks
+app.post('/track-redirect', async (req, res) => {
+  try {
+    const trackingData = {
+      toolId: req.body.toolId,
+      toolName: req.body.toolName,
+      userEmail: req.body.userEmail,
+      sessionId: req.body.sessionId,
+      timestamp: new Date(),
+      userAgent: req.headers['user-agent'],
+      ip: req.ip,
+    };
+
+    await redirectTrackingStorage.insertOne(trackingData);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error tracking redirect:', error);
+    res.status(500).json({ error: 'Failed to track redirect' });
+  }
+});
+
+// Get redirect tracking data
+app.get('/admin/redirect-tracking', async (req, res) => {
+  try {
+    const { page = 1, limit = 50, toolId, dateFrom, dateTo } = req.query;
+    const skip = (page - 1) * limit;
+    const query = {};
+    if (toolId) query.toolId = toolId;
+    if (dateFrom || dateTo) {
+      query.timestamp = {};
+      if (dateFrom) query.timestamp.$gte = new Date(dateFrom);
+      if (dateTo) query.timestamp.$lte = new Date(dateTo);
+    }
+    const tracking = await redirectTrackingStorage
+      .find(query)
+      .sort({ timestamp: -1 })
+      .skip(skip)
+      .limit(Number.parseInt(limit))
+      .toArray();
+    const total = await redirectTrackingStorage.countDocuments(query);
+    // Get click statistics
+    const clickStats = await redirectTrackingStorage
+      .aggregate([
+        { $match: query },
+        {
+          $group: {
+            _id: '$toolName',
+            clicks: { $sum: 1 },
+            toolId: { $first: '$toolId' },
+          },
+        },
+        { $sort: { clicks: -1 } },
+      ])
+      .toArray();
+    res.json({
+      tracking,
+      clickStats,
+      pagination: {
+        current: Number.parseInt(page),
+        total: Math.ceil(total / limit),
+        count: total,
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching redirect tracking:', error);
+    res.status(500).json({ error: 'Failed to fetch redirect tracking' });
+  }
+});
 // Get admin analytics
 app.get('/admin/analytics', async (req, res) => {
   try {
