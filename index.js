@@ -50,8 +50,9 @@ async function run() {
     sessionsStorage = client.db('Toolmate').collection('Sessions');
     redirectTrackingStorage = client.db('Toolmate').collection('RedirectTracking');
     ragSystemStorage = client.db('Toolmate').collection('RagSystemStorage');
-    app.listen(PORT, () => {
+    server.listen(PORT, () => {
       console.log(`🚀 Server is running on port ${PORT}`);
+      console.log(`🔌 Socket.io server is ready`);
     });
   } catch (err) {
     console.error('❌ MongoDB connection error:', err);
