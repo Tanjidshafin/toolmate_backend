@@ -532,6 +532,7 @@ app.get('/admin/redirect-tracking', async (req, res) => {
 app.get('/admin/analytics', async (req, res) => {
   try {
     const { period = '7d' } = req.query;
+
     // Calculate date range
     const now = new Date();
     const startDate = new Date();
@@ -603,6 +604,7 @@ app.get('/admin/analytics', async (req, res) => {
       ])
       .toArray();
 
+    // Tools with no flags (this requires getting all tools and checking against flagged ones)
     const allToolsWithFlags = await flaggedMessagesStorage.distinct('messageId');
     const toolsWithNoFlags = await toolsStorage
       .aggregate([
@@ -651,6 +653,7 @@ app.get('/admin/analytics', async (req, res) => {
       statistics: {
         totalSessions,
         totalFlags,
+        totalRedirects,
         totalUsers,
         subscribedUsers,
       },
