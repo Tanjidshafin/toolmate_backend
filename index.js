@@ -672,7 +672,6 @@ app.get('/rag-system/boosted-tools', async (req, res) => {
         $or: [{ boostExpiry: null }, { boostExpiry: { $gt: new Date() } }],
       })
       .toArray();
-
     res.json(boostedTools);
   } catch (error) {
     console.error('Error fetching boosted tools:', error);
@@ -690,6 +689,32 @@ app.get('/rag-system/hidden-tools', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch hidden tools' });
   }
 });
+//boosted based tools
+app.get('/rag-system/ordered-tools', async (req, res) => {
+  try {
+    const now = new Date();
+    const tools = await ragSystemStorage
+      .find({
+        hidden: { $ne: true },
+      })
+      .toArray();
+    const boosted = [];
+    const others = [];
+    for (const tool of tools) {
+      if (tool.boosted === true && (!tool.boostExpiry || new Date(tool.boostExpiry) > now)) {
+        boosted.push(tool);
+      } else {
+        others.push(tool);
+      }
+    }
+    const orderedTools = [...boosted, ...others];
+    res.json(orderedTools);
+  } catch (error) {
+    console.error('Error fetching ordered tools:', error);
+    res.status(500).json({ error: 'Failed to fetch ordered tools' });
+  }
+});
+
 // //openai content
 // app.post('/send-message', async (req, res) => {
 //   try {
