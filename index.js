@@ -6,9 +6,19 @@ const OpenAI = require('openai');
 const app = express();
 const { ObjectId } = require('mongodb');
 const PORT = process.env.PORT || 5000;
+require('dotenv').config();
+const { Server } = require('socket.io');
+const http = require('http');
 const openai = new OpenAI({
   apiKey:
     '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',
+});
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: {
+    origin: '*',
+    methods: ['GET', 'POST'],
+  },
 });
 app.use(cors());
 app.use(express.json());
@@ -40,7 +50,7 @@ async function run() {
     sessionsStorage = client.db('Toolmate').collection('Sessions');
     redirectTrackingStorage = client.db('Toolmate').collection('RedirectTracking');
     ragSystemStorage = client.db('Toolmate').collection('RagSystemStorage');
-    app.listen(PORT, () => {
+    server.listen(PORT, () => {
       console.log(`🚀 Server is running on port ${PORT}`);
     });
   } catch (err) {
@@ -49,9 +59,34 @@ async function run() {
 }
 
 run();
+// Socket.io for real-time monitoring
+io.on('connection', (socket) => {
+  console.log('Admin connected for real-time monitoring');
+  socket.on('join-monitoring', (data) => {
+    socket.join('admin-monitoring');
+  });
+  socket.on('inject-message', async (data) => {
+    io.to(data.sessionId).emit('admin-message', {
+      message: data.message,
+      timestamp: new Date(),
+    });
+  });
+  socket.on('disconnect', () => {
+    console.log('Admin disconnected from monitoring');
+  });
+});
 
 // Routes
 app.get('/', (req, res) => {
+  // Emit real-time event for root access
+  io.emit('api-access', {
+    endpoint: '/',
+    method: 'GET',
+    timestamp: new Date(),
+    ip: req.ip,
+    userAgent: req.headers['user-agent'],
+  });
+
   res.send('Welcome to Toolmate');
 });
 
@@ -95,6 +130,7 @@ app.post('/add-feedback', async (req, res) => {
     res.status(500).send({ error: 'Failed to store feedback' });
   }
 });
+
 //store and fetch messages
 app.post('/store-messages', async (req, res) => {
   try {
@@ -123,16 +159,34 @@ app.post('/store-messages', async (req, res) => {
     res.status(500).send({ error: 'Internal server error' });
   }
 });
+
 app.get('/messages/:email', async (req, res) => {
   try {
     const email = req.params.email;
     const query = { userEmail: email };
     const result = await messagesStorage.find(query).toArray();
+
+    // Emit real-time event for messages fetch
+    io.emit('messages-fetched', {
+      endpoint: '/messages/:email',
+      email: email,
+      count: result.length,
+      timestamp: new Date(),
+      ip: req.ip,
+    });
+
     res.send(result);
   } catch (error) {
+    // Emit error event
+    io.emit('api-error', {
+      endpoint: '/messages/:email',
+      error: error.message,
+      timestamp: new Date(),
+    });
     res.status(500).send(error);
   }
 });
+
 //store and fetch suggested Tools
 app.post('/store-suggested-tools', async (req, res) => {
   try {
@@ -167,11 +221,28 @@ app.get('/tools/:email', async (req, res) => {
     const email = req.params.email;
     const query = { userEmail: email };
     const result = await toolsStorage.find(query).toArray();
+
+    // Emit real-time event for tools fetch
+    io.emit('tools-fetched', {
+      endpoint: '/tools/:email',
+      email: email,
+      count: result.length,
+      timestamp: new Date(),
+      ip: req.ip,
+    });
+
     res.send(result);
   } catch (error) {
+    // Emit error event
+    io.emit('api-error', {
+      endpoint: '/tools/:email',
+      error: error.message,
+      timestamp: new Date(),
+    });
     res.status(500).send(error);
   }
 });
+
 // Create or update user
 app.post('/store-user', async (req, res) => {
   try {
@@ -209,20 +280,48 @@ app.post('/store-user', async (req, res) => {
     res.status(500).json({ error: 'Failed to store user' });
   }
 });
+
 // Get user by email
 app.get('/user/:email', async (req, res) => {
   try {
     const { email } = req.params;
     const user = await usersStorage.findOne({ userEmail: email });
+
     if (!user) {
+      // Emit user not found event
+      io.emit('user-not-found', {
+        endpoint: '/user/:email',
+        email: email,
+        timestamp: new Date(),
+        ip: req.ip,
+      });
       return res.status(404).json({ error: 'User not found' });
     }
+
+    // Emit user fetched event
+    io.emit('user-fetched', {
+      endpoint: '/user/:email',
+      email: email,
+      userName: user.userName,
+      role: user.role,
+      isSubscribed: user.isSubscribed,
+      timestamp: new Date(),
+      ip: req.ip,
+    });
+
     res.json(user);
   } catch (error) {
     console.error('Error fetching user:', error);
+    // Emit error event
+    io.emit('api-error', {
+      endpoint: '/user/:email',
+      error: error.message,
+      timestamp: new Date(),
+    });
     res.status(500).json({ error: 'Failed to fetch user' });
   }
 });
+
 app.get('/admin/users', async (req, res) => {
   try {
     const { page = 1, limit = 20, search, role } = req.query;
@@ -241,19 +340,41 @@ app.get('/admin/users', async (req, res) => {
       .limit(Number.parseInt(limit))
       .toArray();
     const total = await usersStorage.countDocuments(query);
-    res.json({
+
+    const result = {
       users,
       pagination: {
         current: Number.parseInt(page),
         total: Math.ceil(total / limit),
         count: total,
       },
+    };
+
+    // Emit admin users fetch event
+    io.emit('admin-users-fetched', {
+      endpoint: '/admin/users',
+      totalUsers: total,
+      page: page,
+      limit: limit,
+      search: search,
+      role: role,
+      timestamp: new Date(),
+      ip: req.ip,
     });
+
+    res.json(result);
   } catch (error) {
     console.error('Error fetching users:', error);
+    // Emit error event
+    io.emit('api-error', {
+      endpoint: '/admin/users',
+      error: error.message,
+      timestamp: new Date(),
+    });
     res.status(500).json({ error: 'Failed to fetch users' });
   }
 });
+
 app.put('/admin/users/:email', async (req, res) => {
   try {
     const { email } = req.params;
@@ -273,7 +394,7 @@ app.put('/admin/users/:email', async (req, res) => {
     res.status(500).json({ error: 'Failed to update user' });
   }
 });
-// Get all flagged messages
+
 // Get all flagged messages
 app.get('/admin/flagged-messages', async (req, res) => {
   try {
@@ -294,16 +415,34 @@ app.get('/admin/flagged-messages', async (req, res) => {
 
     const total = await flaggedMessagesStorage.countDocuments(query);
 
-    res.json({
+    const result = {
       flaggedMessages,
       pagination: {
         current: Number.parseInt(page),
         total: Math.ceil(total / limit),
         count: total,
       },
+    };
+
+    // Emit flagged messages fetch event
+    io.emit('flagged-messages-fetched', {
+      endpoint: '/admin/flagged-messages',
+      totalFlagged: total,
+      status: status,
+      page: page,
+      timestamp: new Date(),
+      ip: req.ip,
     });
+
+    res.json(result);
   } catch (error) {
     console.error('Error fetching flagged messages:', error);
+    // Emit error event
+    io.emit('api-error', {
+      endpoint: '/admin/flagged-messages',
+      error: error.message,
+      timestamp: new Date(),
+    });
     res.status(500).json({ error: 'Failed to fetch flagged messages' });
   }
 });
@@ -341,6 +480,13 @@ app.get('/admin/flagged-messages/:id/context', async (req, res) => {
 
     const flaggedMessage = await flaggedMessagesStorage.findOne({ _id: new ObjectId(id) });
     if (!flaggedMessage) {
+      // Emit not found event
+      io.emit('flagged-message-context-not-found', {
+        endpoint: '/admin/flagged-messages/:id/context',
+        messageId: id,
+        timestamp: new Date(),
+        ip: req.ip,
+      });
       return res.status(404).json({ error: 'Flagged message not found' });
     }
 
@@ -355,13 +501,31 @@ app.get('/admin/flagged-messages/:id/context', async (req, res) => {
       userEmail: { $in: flaggedMessage.userEmail },
     });
 
-    res.json({
+    const result = {
       flaggedMessage,
       sessionContext: session || null,
       userDetails: user || null,
+    };
+
+    // Emit context fetched event
+    io.emit('flagged-message-context-fetched', {
+      endpoint: '/admin/flagged-messages/:id/context',
+      messageId: id,
+      hasSession: !!session,
+      hasUser: !!user,
+      timestamp: new Date(),
+      ip: req.ip,
     });
+
+    res.json(result);
   } catch (error) {
     console.error('Error fetching session context:', error);
+    // Emit error event
+    io.emit('api-error', {
+      endpoint: '/admin/flagged-messages/:id/context',
+      error: error.message,
+      timestamp: new Date(),
+    });
     res.status(500).json({ error: 'Failed to fetch session context' });
   }
 });
@@ -383,7 +547,6 @@ app.post('/store-session', async (req, res) => {
       flagTriggered: req.body.flagTriggered || false,
       messages: req.body.messages || [],
     };
-
     const result = await sessionsStorage.insertOne(sessionData);
     res.json({ success: true, sessionId: result.insertedId });
   } catch (error) {
@@ -425,19 +588,38 @@ app.get('/admin/sessions', async (req, res) => {
       })
     );
 
-    res.json({
+    const result = {
       sessions: enrichedSessions,
       pagination: {
         current: Number.parseInt(page),
         total: Math.ceil(total / limit),
         count: total,
       },
+    };
+
+    // Emit sessions fetch event
+    io.emit('admin-sessions-fetched', {
+      endpoint: '/admin/sessions',
+      totalSessions: total,
+      page: page,
+      search: search,
+      timestamp: new Date(),
+      ip: req.ip,
     });
+
+    res.json(result);
   } catch (error) {
     console.error('Error fetching sessions:', error);
+    // Emit error event
+    io.emit('api-error', {
+      endpoint: '/admin/sessions',
+      error: error.message,
+      timestamp: new Date(),
+    });
     res.status(500).json({ error: 'Failed to fetch sessions' });
   }
 });
+
 // Get specific session details
 app.get('/admin/sessions/:id', async (req, res) => {
   try {
@@ -445,21 +627,48 @@ app.get('/admin/sessions/:id', async (req, res) => {
     const session = await sessionsStorage.findOne({ _id: new ObjectId(id) });
 
     if (!session) {
+      // Emit session not found event
+      io.emit('session-not-found', {
+        endpoint: '/admin/sessions/:id',
+        sessionId: id,
+        timestamp: new Date(),
+        ip: req.ip,
+      });
       return res.status(404).json({ error: 'Session not found' });
     }
+
     // Get user details
     const user = await usersStorage.findOne({
       userEmail: { $in: Array.isArray(session.userEmail) ? session.userEmail : [session.userEmail] },
     });
-    res.json({
+
+    const result = {
       ...session,
       userDetails: user || null,
+    };
+
+    // Emit session fetched event
+    io.emit('session-fetched', {
+      endpoint: '/admin/sessions/:id',
+      sessionId: id,
+      hasUser: !!user,
+      timestamp: new Date(),
+      ip: req.ip,
     });
+
+    res.json(result);
   } catch (error) {
     console.error('Error fetching session:', error);
+    // Emit error event
+    io.emit('api-error', {
+      endpoint: '/admin/sessions/:id',
+      error: error.message,
+      timestamp: new Date(),
+    });
     res.status(500).json({ error: 'Failed to fetch session' });
   }
 });
+
 // Track redirect clicks
 app.post('/track-redirect', async (req, res) => {
   try {
@@ -469,10 +678,12 @@ app.post('/track-redirect', async (req, res) => {
       userEmail: req.body.userEmail,
       sessionId: req.body.sessionId,
       timestamp: new Date(),
+      price: req.body.price,
+      category: req.body.category,
+      budgetTier: req.body.budgetTier,
       userAgent: req.headers['user-agent'],
       ip: req.ip,
     };
-
     await redirectTrackingStorage.insertOne(trackingData);
     res.json({ success: true });
   } catch (error) {
@@ -500,6 +711,7 @@ app.get('/admin/redirect-tracking', async (req, res) => {
       .limit(Number.parseInt(limit))
       .toArray();
     const total = await redirectTrackingStorage.countDocuments(query);
+
     // Get click statistics
     const clickStats = await redirectTrackingStorage
       .aggregate([
@@ -514,7 +726,8 @@ app.get('/admin/redirect-tracking', async (req, res) => {
         { $sort: { clicks: -1 } },
       ])
       .toArray();
-    res.json({
+
+    const result = {
       tracking,
       clickStats,
       pagination: {
@@ -522,12 +735,32 @@ app.get('/admin/redirect-tracking', async (req, res) => {
         total: Math.ceil(total / limit),
         count: total,
       },
+    };
+
+    // Emit redirect tracking fetch event
+    io.emit('redirect-tracking-fetched', {
+      endpoint: '/admin/redirect-tracking',
+      totalTracking: total,
+      toolId: toolId,
+      dateRange: { from: dateFrom, to: dateTo },
+      topTool: clickStats[0]?.toolName || null,
+      timestamp: new Date(),
+      ip: req.ip,
     });
+
+    res.json(result);
   } catch (error) {
     console.error('Error fetching redirect tracking:', error);
+    // Emit error event
+    io.emit('api-error', {
+      endpoint: '/admin/redirect-tracking',
+      error: error.message,
+      timestamp: new Date(),
+    });
     res.status(500).json({ error: 'Failed to fetch redirect tracking' });
   }
 });
+
 // Get admin analytics
 app.get('/admin/analytics', async (req, res) => {
   try {
@@ -647,7 +880,7 @@ app.get('/admin/analytics', async (req, res) => {
       createdAt: { $gte: startDate },
     });
 
-    res.json({
+    const result = {
       period,
       dateRange: { start: startDate, end: now },
       statistics: {
@@ -660,18 +893,57 @@ app.get('/admin/analytics', async (req, res) => {
       mostFlaggedTools,
       flagsByReason,
       toolsWithNoFlags: toolsWithNoFlags.slice(0, 10),
+    };
+
+    // Emit analytics fetch event
+    io.emit('analytics-fetched', {
+      endpoint: '/admin/analytics',
+      period: period,
+      statistics: {
+        totalSessions,
+        totalFlags,
+        totalRedirects,
+        totalUsers,
+        subscribedUsers,
+      },
+      timestamp: new Date(),
+      ip: req.ip,
     });
+
+    res.json(result);
   } catch (error) {
     console.error('Error fetching analytics:', error);
+    // Emit error event
+    io.emit('api-error', {
+      endpoint: '/admin/analytics',
+      error: error.message,
+      timestamp: new Date(),
+    });
     res.status(500).json({ error: 'Failed to fetch analytics' });
   }
 });
+
 app.get('/admin/rag-system', async (req, res) => {
   try {
     const ragSettings = await ragSystemStorage.find({}).toArray();
+
+    // Emit RAG system fetch event
+    io.emit('rag-system-fetched', {
+      endpoint: '/admin/rag-system',
+      settingsCount: ragSettings.length,
+      timestamp: new Date(),
+      ip: req.ip,
+    });
+
     res.json(ragSettings);
   } catch (error) {
     console.error('Error fetching RAG settings:', error);
+    // Emit error event
+    io.emit('api-error', {
+      endpoint: '/admin/rag-system',
+      error: error.message,
+      timestamp: new Date(),
+    });
     res.status(500).json({ error: 'Failed to fetch RAG settings' });
   }
 });
@@ -743,9 +1015,24 @@ app.get('/rag-system/boosted-tools', async (req, res) => {
         $or: [{ boostExpiry: null }, { boostExpiry: { $gt: new Date() } }],
       })
       .toArray();
+
+    // Emit boosted tools fetch event
+    io.emit('boosted-tools-fetched', {
+      endpoint: '/rag-system/boosted-tools',
+      boostedCount: boostedTools.length,
+      timestamp: new Date(),
+      ip: req.ip,
+    });
+
     res.json(boostedTools);
   } catch (error) {
     console.error('Error fetching boosted tools:', error);
+    // Emit error event
+    io.emit('api-error', {
+      endpoint: '/rag-system/boosted-tools',
+      error: error.message,
+      timestamp: new Date(),
+    });
     res.status(500).json({ error: 'Failed to fetch boosted tools' });
   }
 });
@@ -754,12 +1041,28 @@ app.get('/rag-system/boosted-tools', async (req, res) => {
 app.get('/rag-system/hidden-tools', async (req, res) => {
   try {
     const hiddenTools = await ragSystemStorage.find({ hidden: true }).toArray();
+
+    // Emit hidden tools fetch event
+    io.emit('hidden-tools-fetched', {
+      endpoint: '/rag-system/hidden-tools',
+      hiddenCount: hiddenTools.length,
+      timestamp: new Date(),
+      ip: req.ip,
+    });
+
     res.json(hiddenTools);
   } catch (error) {
     console.error('Error fetching hidden tools:', error);
+    // Emit error event
+    io.emit('api-error', {
+      endpoint: '/rag-system/hidden-tools',
+      error: error.message,
+      timestamp: new Date(),
+    });
     res.status(500).json({ error: 'Failed to fetch hidden tools' });
   }
 });
+
 //boosted based tools
 app.get('/rag-system/ordered-tools', async (req, res) => {
   try {
@@ -779,37 +1082,71 @@ app.get('/rag-system/ordered-tools', async (req, res) => {
       }
     }
     const orderedTools = [...boosted, ...others];
+
+    // Emit ordered tools fetch event
+    io.emit('ordered-tools-fetched', {
+      endpoint: '/rag-system/ordered-tools',
+      totalTools: orderedTools.length,
+      boostedCount: boosted.length,
+      regularCount: others.length,
+      timestamp: new Date(),
+      ip: req.ip,
+    });
+
     res.json(orderedTools);
   } catch (error) {
     console.error('Error fetching ordered tools:', error);
+    // Emit error event
+    io.emit('api-error', {
+      endpoint: '/rag-system/ordered-tools',
+      error: error.message,
+      timestamp: new Date(),
+    });
     res.status(500).json({ error: 'Failed to fetch ordered tools' });
   }
 });
 
-// //openai content
-// app.post('/send-message', async (req, res) => {
-//   try {
-//     const { message } = req.body;
-//     if (!message) {
-//       return res.status(400).json({ error: 'Message is required' });
-//     }
-//     const completion = await openai.chat.completions.create({
-//       model: 'gpt-4.1',
-//       messages: [
-//         {
-//           role: 'user',
-//           content: message,
-//         },
-//       ],
-//       max_tokens: 100,
-//     });
-//     const responseMessage = completion.choices[0]?.message?.content;
-//     if (!responseMessage) {
-//       throw new Error('No response message received from OpenAI');
-//     }
-//     res.json({ response: responseMessage });
-//   } catch (error) {
-//     console.error('Error processing message:', error);
-//     res.status(500).json({ error: error.message || 'Failed to process message' });
-//   }
-// });
+app.get('/admin/active-sessions', async (req, res) => {
+  try {
+    const fiveMinutesAgo = new Date();
+    fiveMinutesAgo.setMinutes(fiveMinutesAgo.getMinutes() - 5);
+    const activeSessions = await sessionsStorage
+      .find({
+        timestamp: { $gte: fiveMinutesAgo },
+      })
+      .sort({ timestamp: -1 })
+      .toArray();
+
+    // Enrich with user details
+    const enrichedSessions = await Promise.all(
+      activeSessions.map(async (session) => {
+        const user = await usersStorage.findOne({
+          userEmail: { $in: Array.isArray(session.userEmail) ? session.userEmail : [session.userEmail] },
+        });
+        return {
+          ...session,
+          userDetails: user || null,
+        };
+      })
+    );
+
+    // Emit active sessions fetch event
+    io.emit('active-sessions-fetched', {
+      endpoint: '/admin/active-sessions',
+      activeCount: enrichedSessions.length,
+      timestamp: new Date(),
+      ip: req.ip,
+    });
+
+    res.json(enrichedSessions);
+  } catch (error) {
+    console.error('Error fetching active sessions:', error);
+    // Emit error event
+    io.emit('api-error', {
+      endpoint: '/admin/active-sessions',
+      error: error.message,
+      timestamp: new Date(),
+    });
+    res.status(500).json({ error: 'Failed to fetch active sessions' });
+  }
+});
