@@ -26,6 +26,7 @@ let usersStorage;
 let flaggedMessagesStorage;
 let sessionsStorage;
 let redirectTrackingStorage;
+let ragSystemStorage;
 async function run() {
   try {
     await client.connect();
@@ -38,6 +39,7 @@ async function run() {
     flaggedMessagesStorage = client.db('Toolmate').collection('FlaggedMessages');
     sessionsStorage = client.db('Toolmate').collection('Sessions');
     redirectTrackingStorage = client.db('Toolmate').collection('RedirectTracking');
+    ragSystemStorage = client.db('Toolmate').collection('RagSystemStorage');
     app.listen(PORT, () => {
       console.log(`🚀 Server is running on port ${PORT}`);
     });
@@ -591,6 +593,101 @@ app.get('/admin/analytics', async (req, res) => {
   } catch (error) {
     console.error('Error fetching analytics:', error);
     res.status(500).json({ error: 'Failed to fetch analytics' });
+  }
+});
+app.get('/admin/rag-system', async (req, res) => {
+  try {
+    const ragSettings = await ragSystemStorage.find({}).toArray();
+    res.json(ragSettings);
+  } catch (error) {
+    console.error('Error fetching RAG settings:', error);
+    res.status(500).json({ error: 'Failed to fetch RAG settings' });
+  }
+});
+
+// Update tool visibility
+app.put('/admin/rag-system/tool/:id/visibility', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { hidden, updatedBy } = req.body;
+    const result = await ragSystemStorage.updateOne(
+      { id },
+      {
+        $set: {
+          id,
+          hidden,
+          updatedAt: new Date(),
+          updatedBy: updatedBy || 'admin',
+        },
+      },
+      { upsert: true }
+    );
+
+    res.json({ success: true, message: 'Tool visibility updated' });
+  } catch (error) {
+    console.error('Error updating tool visibility:', error);
+    res.status(500).json({ error: 'Failed to update tool visibility' });
+  }
+});
+
+// Boost tool temporarily
+app.put('/admin/rag-system/tool/:id/boost', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { boosted, duration, updatedBy } = req.body;
+
+    let boostExpiry = null;
+    if (boosted && duration) {
+      boostExpiry = new Date();
+      boostExpiry.setHours(boostExpiry.getHours() + duration);
+    }
+
+    const result = await ragSystemStorage.updateOne(
+      { id },
+      {
+        $set: {
+          id,
+          boosted,
+          boostExpiry,
+          updatedAt: new Date(),
+          updatedBy: updatedBy || 'admin',
+        },
+      },
+      { upsert: true }
+    );
+
+    res.json({ success: true, message: 'Tool boost updated' });
+  } catch (error) {
+    console.error('Error updating tool boost:', error);
+    res.status(500).json({ error: 'Failed to update tool boost' });
+  }
+});
+
+// Get boosted tools for frontend
+app.get('/rag-system/boosted-tools', async (req, res) => {
+  try {
+    const boostedTools = await ragSystemStorage
+      .find({
+        boosted: true,
+        $or: [{ boostExpiry: null }, { boostExpiry: { $gt: new Date() } }],
+      })
+      .toArray();
+
+    res.json(boostedTools);
+  } catch (error) {
+    console.error('Error fetching boosted tools:', error);
+    res.status(500).json({ error: 'Failed to fetch boosted tools' });
+  }
+});
+
+// Get hidden tools for frontend
+app.get('/rag-system/hidden-tools', async (req, res) => {
+  try {
+    const hiddenTools = await ragSystemStorage.find({ hidden: true }).toArray();
+    res.json(hiddenTools);
+  } catch (error) {
+    console.error('Error fetching hidden tools:', error);
+    res.status(500).json({ error: 'Failed to fetch hidden tools' });
   }
 });
 // //openai content
