@@ -50,8 +50,6 @@ async function run() {
     redirectTrackingStorage = client.db('Toolmate').collection('RedirectTracking');
     ragSystemStorage = client.db('Toolmate').collection('RagSystemStorage');
     chatLogsStorage = client.db('Toolmate').collection('ChatLogsStorage');
-
-    // Use server.listen instead of app.listen for Socket.IO
     server.listen(PORT, () => {
       console.log(`🚀 Server is running on port ${PORT}`);
       console.log(`🔌 Socket.io server is ready`);
@@ -74,35 +72,27 @@ io.on('connection', (socket) => {
   });
 
   socket.on('inject-message', async (data) => {
-    // This emits to the specific user's session, not to other admins
     io.to(data.sessionId).emit('admin-message', {
       message: data.message,
       timestamp: new Date(),
-      sender: 'admin', // Clarify sender
+      sender: 'admin',
     });
-    // Optionally, also broadcast this injected message to other admins if needed
-    // io.to('admin-monitoring').emit('new-live-message', { ... });
+
     console.log(`📤 Admin ${socket.id} injected message to session ${data.sessionId}`);
   });
-
   socket.on('disconnect', (reason) => {
     console.log('❌ Admin disconnected from monitoring:', socket.id, 'Reason:', reason);
   });
 });
-
-// Helper function to emit new live message
 async function emitNewLiveMessage(messageData) {
   try {
-    // Enrich with user details if possible
     let userDetails = null;
     if (messageData.userEmail) {
-      // Assuming userEmail is an array or string
       const emailToQuery = Array.isArray(messageData.userEmail) ? messageData.userEmail[0] : messageData.userEmail;
       if (emailToQuery) {
         userDetails = await usersStorage.findOne({ userEmail: emailToQuery });
       }
     }
-
     const payload = {
       sessionId: messageData.sessionId,
       userName: messageData.userName || (userDetails ? userDetails.userName : 'Unknown User'),
@@ -110,7 +100,6 @@ async function emitNewLiveMessage(messageData) {
       userImage: userDetails ? userDetails.userImage : null,
       timestamp: messageData.timestamp || new Date(),
       messageText: messageData.messageText,
-      // Add any other relevant fields for the live feed
     };
     io.to('admin-monitoring').emit('new-live-message', payload);
     console.log('📢 Emitted new-live-message to admin-monitoring room:', payload.sessionId);
@@ -118,8 +107,6 @@ async function emitNewLiveMessage(messageData) {
     console.error('Error emitting new live message:', error);
   }
 }
-
-// Helper function to notify admins about active session changes
 function notifyActiveSessionsChanged() {
   io.to('admin-monitoring').emit('active-sessions-changed');
   console.log('🔄 Emitted active-sessions-changed to admin-monitoring room');
@@ -459,9 +446,6 @@ app.get('/admin/flagged-messages/:id/context', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch session context' });
   }
 });
-
-// ==================== SESSION MANAGEMENT ROUTES ====================
-// Store chat session
 app.post('/store-session', async (req, res) => {
   try {
     const {
@@ -908,6 +892,49 @@ app.get('/rag-system/ordered-tools', async (req, res) => {
   } catch (error) {
     console.error('Error fetching ordered tools:', error);
     res.status(500).json({ error: 'Failed to fetch ordered tools' });
+  }
+});
+app.post('/api/v1/admin/login', (req, res) => {
+  try {
+    const { username, password } = req.body;
+    if (!username || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Username and password are required',
+      });
+    }
+    const adminEmail = process.env.EMAIL;
+    const adminPassword = process.env.PASSWORD;
+    if (!adminEmail || !adminPassword) {
+      return res.status(500).json({
+        success: false,
+        message: 'Server configuration error',
+      });
+    }
+    if (username === adminEmail && password === adminPassword) {
+      const userData = {
+        username: 'allan',
+        role: ['all'],
+        permissions: ['all'],
+        userEmail:"help@toolmate.com"
+      };
+      return res.status(200).json({
+        success: true,
+        message: 'Login successful',
+        ...userData,
+      });
+    } else {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid credentials',
+      });
+    }
+  } catch (error) {
+    console.error('Login error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+    });
   }
 });
 app.use((req, res) => {
