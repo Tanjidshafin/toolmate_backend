@@ -913,7 +913,7 @@ app.post('/api/v1/admin/login', (req, res) => {
     }
     if (username === adminEmail && password === adminPassword) {
       const userData = {
-        username: 'allan',
+        username: 'Allan Davis',
         role: ['all'],
         permissions: ['all'],
         userEmail:"help@toolmate.com"
