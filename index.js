@@ -175,17 +175,15 @@ app.post('/store-messages', async (req, res) => {
     if (data.messages && data.messages.length > 0) {
       const mateyMessages = data.messages.filter((msg) => msg.sender === 'matey');
       const userMessages = data.messages.filter((msg) => msg.sender === 'user');
-
       const lastMateyMessage = mateyMessages[mateyMessages.length - 1];
       const lastUserMessage = userMessages[userMessages.length - 1];
-
       if (data.sessionId && lastMateyMessage && lastUserMessage) {
         emitNewLiveMessage({
           sessionId: data.sessionId,
           userName: data.userName,
           userEmail: data.userEmail,
           timestamp: lastMateyMessage.timestamp || new Date(),
-          prompt: lastUserMessage.prompt,
+          prompt: lastUserMessage.text,
           messageText: lastMateyMessage.text,
         });
       }
@@ -481,14 +479,17 @@ app.post('/store-session', async (req, res) => {
     ]);
     notifyActiveSessionsChanged();
     if (messages.length > 0) {
-      const lastMessage = messages[messages.length - 1];
+      const mateyMessages = data.messages.filter((msg) => msg.sender === 'matey');
+      const userMessages = data.messages.filter((msg) => msg.sender === 'user');
+      const lastMateyMessage = mateyMessages[mateyMessages.length - 1];
+      const lastUserMessage = userMessages[userMessages.length - 1];
       emitNewLiveMessage({
         sessionId,
         userName,
         userEmail,
         timestamp: lastMessage.timestamp || timestamp,
-        prompt: lastMessage.prompt,
-        messageText: lastMessage.text,
+        prompt: lastUserMessage.text,
+        messageText: lastMateyMessage.text,
       });
     }
 
