@@ -93,7 +93,6 @@ async function emitNewLiveMessage(messageData) {
       userEmail: messageData.userEmail || (userDetails ? userDetails.userEmail : 'N/A'),
       userImage: userDetails ? userDetails.userImage : null,
       timestamp: messageData.timestamp || new Date(),
-      prompt: messageData.prompt,
       messageText: messageData.messageText,
     };
     io.to('admin-monitoring').emit('new-live-message', payload);
@@ -172,19 +171,23 @@ app.post('/store-messages', async (req, res) => {
       result = await messagesStorage.insertOne(data);
       res.send({ inserted: true, result });
     }
+
+    // To emit a new message, we need to know which message is new.
+    // This current structure replaces all messages.
+    // If you want to emit the *last* message from the `data.messages` array:
     if (data.messages && data.messages.length > 0) {
-      const mateyMessages = data.messages.filter((msg) => msg.sender === 'matey');
-      const userMessages = data.messages.filter((msg) => msg.sender === 'user');
-      const lastMateyMessage = mateyMessages[mateyMessages.length - 1];
-      const lastUserMessage = userMessages[userMessages.length - 1];
-      if (data.sessionId && lastMateyMessage && lastUserMessage) {
+      const lastMessage = data.messages[data.messages.length - 1];
+      // Assuming `lastMessage` has a structure like { id, text, sender, timestamp }
+      // And you have a `sessionId` associated with these messages.
+      // This part needs more context on how `sessionId` relates to `messagesStorage`.
+      // For now, let's assume `data` might contain `sessionId`.
+      if (data.sessionId && lastMessage) {
         emitNewLiveMessage({
-          sessionId: data.sessionId,
+          sessionId: data.sessionId, // You'll need to ensure sessionId is available here
           userName: data.userName,
           userEmail: data.userEmail,
-          timestamp: lastMateyMessage.timestamp || new Date(),
-          prompt: lastUserMessage.text,
-          messageText: lastMateyMessage.text,
+          timestamp: lastMessage.timestamp || new Date(),
+          messageText: lastMessage.text, // Assuming 'text' field
         });
       }
     }
@@ -479,17 +482,13 @@ app.post('/store-session', async (req, res) => {
     ]);
     notifyActiveSessionsChanged();
     if (messages.length > 0) {
-      const mateyMessages = data.messages.filter((msg) => msg.sender === 'matey');
-      const userMessages = data.messages.filter((msg) => msg.sender === 'user');
-      const lastMateyMessage = mateyMessages[mateyMessages.length - 1];
-      const lastUserMessage = userMessages[userMessages.length - 1];
+      const lastMessage = messages[messages.length - 1];
       emitNewLiveMessage({
         sessionId,
         userName,
         userEmail,
-        timestamp: lastUserMessage.timestamp || timestamp,
-        prompt: lastUserMessage.text,
-        messageText: lastMateyMessage.text,
+        timestamp: lastMessage.timestamp || timestamp,
+        messageText: lastMessage.text,
       });
     }
 
