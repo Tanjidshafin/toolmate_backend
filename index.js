@@ -176,7 +176,9 @@ app.post('/store-messages', async (req, res) => {
     // This current structure replaces all messages.
     // If you want to emit the *last* message from the `data.messages` array:
     if (data.messages && data.messages.length > 0) {
-      const lastMessage = data.messages[data.messages.length - 1];
+      const userMessages = data.messages.filter((msg) => msg.sender === 'user');
+      const mateyMessages = data.messages.filter((msg) => msg.sender === 'matey');
+      const lastMessage = mateyMessages[mateyMessages.length - 1];
       // Assuming `lastMessage` has a structure like { id, text, sender, timestamp }
       // And you have a `sessionId` associated with these messages.
       // This part needs more context on how `sessionId` relates to `messagesStorage`.
@@ -187,7 +189,8 @@ app.post('/store-messages', async (req, res) => {
           userName: data.userName,
           userEmail: data.userEmail,
           timestamp: lastMessage.timestamp || new Date(),
-          messageText: lastMessage.text, // Assuming 'text' field
+          messageText: lastMessage.text,
+          // Assuming 'text' field
         });
       }
     }
@@ -482,7 +485,9 @@ app.post('/store-session', async (req, res) => {
     ]);
     notifyActiveSessionsChanged();
     if (messages.length > 0) {
-      const lastMessage = messages[messages.length - 1];
+      const userMessages = data.messages.filter((msg) => msg.sender === 'user');
+      const mateyMessages = data.messages.filter((msg) => msg.sender === 'matey');
+      const lastMessage = mateyMessages[mateyMessages.length - 1];
       emitNewLiveMessage({
         sessionId,
         userName,
