@@ -487,7 +487,7 @@ app.post('/store-session', async (req, res) => {
         sessionId,
         userName,
         userEmail,
-        timestamp: lastMessage.timestamp || timestamp,
+        timestamp: lastUserMessage.timestamp || timestamp,
         prompt: lastUserMessage.text,
         messageText: lastMateyMessage.text,
       });
