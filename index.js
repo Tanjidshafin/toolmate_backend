@@ -35,7 +35,6 @@ let sessionsStorage;
 let redirectTrackingStorage;
 let ragSystemStorage;
 let chatLogsStorage;
-
 async function run() {
   try {
     await client.connect();
@@ -56,28 +55,23 @@ async function run() {
     });
   } catch (err) {
     console.error('❌ MongoDB connection error:', err);
-    process.exit(1); // Exit if DB connection fails
+    process.exit(1);
   }
 }
 
 run();
-
-// Socket.io for real-time monitoring
 io.on('connection', (socket) => {
   console.log('✅ Admin connected for real-time monitoring:', socket.id);
-
   socket.on('join-monitoring', (data) => {
     console.log('📡 Client joined monitoring room:', socket.id);
     socket.join('admin-monitoring');
   });
-
   socket.on('inject-message', async (data) => {
     io.to(data.sessionId).emit('admin-message', {
       message: data.message,
       timestamp: new Date(),
       sender: 'admin',
     });
-
     console.log(`📤 Admin ${socket.id} injected message to session ${data.sessionId}`);
   });
   socket.on('disconnect', (reason) => {
@@ -157,15 +151,10 @@ app.post('/add-feedback', async (req, res) => {
     res.status(500).send({ error: 'Failed to store feedback' });
   }
 });
-
-// Store and fetch messages
-// This endpoint seems to be for bulk storing/updating a user's entire message history.
-// If individual messages are added this way, we need to identify the *new* message.
 app.post('/store-messages', async (req, res) => {
   try {
     const data = req.body; // { userEmail, userName, messages: [...] }
     const emailArray = Array.isArray(data.userEmail) ? data.userEmail : [data.userEmail];
-
     const existingUserMessages = await messagesStorage.findOne({
       userEmail: { $elemMatch: { $in: emailArray } },
       userName: data.userName,
@@ -565,31 +554,23 @@ app.get('/admin/chat-logs', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch chat logs' });
   }
 });
-// Get all sessions for admin
 app.get('/admin/sessions', async (req, res) => {
   try {
     const { page = 1, limit = 20, search } = req.query;
     const skip = (page - 1) * limit;
-
     const query = {};
     if (search) {
-      query.$or = [
-        { userName: { $regex: search, $options: 'i' } },
-        { prompt: { $regex: search, $options: 'i' } },
-        // Add search by email if userEmail is a string, or handle array search
-        // { userEmail: { $regex: search, $options: 'i' } }
-      ];
+      query.$or = [{ userName: { $regex: search, $options: 'i' } }, { prompt: { $regex: search, $options: 'i' } }];
     }
 
     const sessions = await sessionsStorage
       .find(query)
-      .sort({ timestamp: -1 }) // Sort by most recent
+      .sort({ timestamp: -1 })
       .skip(skip)
       .limit(Number.parseInt(limit))
       .toArray();
 
     const total = await sessionsStorage.countDocuments(query);
-
     const enrichedSessions = await Promise.all(
       sessions.map(async (session) => {
         const emailToQuery = Array.isArray(session.userEmail) ? session.userEmail[0] : session.userEmail;
@@ -638,23 +619,52 @@ app.get('/admin/sessions/:id', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch session' });
   }
 });
-
-// Get active sessions (e.g., updated in the last 5 minutes)
 app.get('/admin/active-sessions', async (req, res) => {
   try {
     const fiveMinutesAgo = new Date();
     fiveMinutesAgo.setMinutes(fiveMinutesAgo.getMinutes() - 5);
-
-    const activeSessions = await sessionsStorage
-      .find({
-        timestamp: { $gte: fiveMinutesAgo }, // Query for sessions updated recently
-      })
-      .sort({ timestamp: -1 })
+    const uniqueSessions = await chatLogsStorage
+      .aggregate([
+        {
+          $match: {
+            timestamp: { $gte: fiveMinutesAgo },
+          },
+        },
+        {
+          $addFields: {
+            email: {
+              $cond: {
+                if: { $isArray: '$userEmail' },
+                then: { $arrayElemAt: ['$userEmail', 0] },
+                else: '$userEmail',
+              },
+            },
+            userAgent: '$metadata.userAgent',
+            ip: '$metadata.ip',
+          },
+        },
+        {
+          $sort: { timestamp: -1 },
+        },
+        {
+          $group: {
+            _id: {
+              email: '$email',
+              userName: '$userName',
+              userAgent: '$userAgent',
+              ip: '$ip',
+            },
+            latestSession: { $first: '$$ROOT' },
+          },
+        },
+        {
+          $replaceRoot: { newRoot: '$latestSession' },
+        },
+      ])
       .toArray();
-
     const enrichedSessions = await Promise.all(
-      activeSessions.map(async (session) => {
-        const emailToQuery = Array.isArray(session.userEmail) ? session.userEmail[0] : session.userEmail;
+      uniqueSessions.map(async (session) => {
+        const emailToQuery = session.userEmail?.[0] || session.userEmail;
         const user = emailToQuery ? await usersStorage.findOne({ userEmail: emailToQuery }) : null;
         return {
           ...session,
@@ -662,7 +672,6 @@ app.get('/admin/active-sessions', async (req, res) => {
         };
       })
     );
-
     res.json(enrichedSessions);
   } catch (error) {
     console.error('Error fetching active sessions:', error);
@@ -670,7 +679,6 @@ app.get('/admin/active-sessions', async (req, res) => {
   }
 });
 
-// ... (Keep existing routes for redirect tracking, analytics, RAG system)
 app.post('/track-redirect', async (req, res) => {
   try {
     const trackingData = {
@@ -916,7 +924,7 @@ app.post('/api/v1/admin/login', (req, res) => {
         username: 'Allan Davis',
         role: ['all'],
         permissions: ['all'],
-        userEmail:"help@toolmate.com"
+        userEmail: 'help@toolmate.com',
       };
       return res.status(200).json({
         success: true,
