@@ -93,6 +93,7 @@ async function emitNewLiveMessage(messageData) {
       userEmail: messageData.userEmail || (userDetails ? userDetails.userEmail : 'N/A'),
       userImage: userDetails ? userDetails.userImage : null,
       timestamp: messageData.timestamp || new Date(),
+      prompt: messageData.prompt,
       messageText: messageData.messageText,
     };
     io.to('admin-monitoring').emit('new-live-message', payload);
@@ -171,23 +172,21 @@ app.post('/store-messages', async (req, res) => {
       result = await messagesStorage.insertOne(data);
       res.send({ inserted: true, result });
     }
-
-    // To emit a new message, we need to know which message is new.
-    // This current structure replaces all messages.
-    // If you want to emit the *last* message from the `data.messages` array:
     if (data.messages && data.messages.length > 0) {
-      const lastMessage = data.messages[data.messages.length - 1];
-      // Assuming `lastMessage` has a structure like { id, text, sender, timestamp }
-      // And you have a `sessionId` associated with these messages.
-      // This part needs more context on how `sessionId` relates to `messagesStorage`.
-      // For now, let's assume `data` might contain `sessionId`.
-      if (data.sessionId && lastMessage) {
+      const mateyMessages = data.messages.filter((msg) => msg.sender === 'matey');
+      const userMessages = data.messages.filter((msg) => msg.sender === 'user');
+
+      const lastMateyMessage = mateyMessages[mateyMessages.length - 1];
+      const lastUserMessage = userMessages[userMessages.length - 1];
+
+      if (data.sessionId && lastMateyMessage && lastUserMessage) {
         emitNewLiveMessage({
-          sessionId: data.sessionId, // You'll need to ensure sessionId is available here
+          sessionId: data.sessionId,
           userName: data.userName,
           userEmail: data.userEmail,
-          timestamp: lastMessage.timestamp || new Date(),
-          messageText: lastMessage.text, // Assuming 'text' field
+          timestamp: lastMateyMessage.timestamp || new Date(),
+          prompt: lastUserMessage.prompt,
+          messageText: lastMateyMessage.text,
         });
       }
     }
@@ -300,9 +299,6 @@ app.get('/user/:email', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch user' });
   }
 });
-
-// Admin routes for users, flagged messages, etc. (largely unchanged for this issue)
-// ... (Keep existing admin routes for users, flagged messages) ...
 app.get('/admin/users', async (req, res) => {
   try {
     const { page = 1, limit = 20, search, role } = req.query;
@@ -491,6 +487,7 @@ app.post('/store-session', async (req, res) => {
         userName,
         userEmail,
         timestamp: lastMessage.timestamp || timestamp,
+        prompt: lastMessage.prompt,
         messageText: lastMessage.text,
       });
     }
@@ -569,7 +566,6 @@ app.get('/admin/sessions', async (req, res) => {
       .skip(skip)
       .limit(Number.parseInt(limit))
       .toArray();
-
     const total = await sessionsStorage.countDocuments(query);
     const enrichedSessions = await Promise.all(
       sessions.map(async (session) => {
@@ -595,8 +591,6 @@ app.get('/admin/sessions', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch sessions' });
   }
 });
-
-// Get specific session details
 app.get('/admin/sessions/:id', async (req, res) => {
   try {
     const { id } = req.params;
