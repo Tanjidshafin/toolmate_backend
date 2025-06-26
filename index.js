@@ -464,7 +464,7 @@ app.post('/store-session', async (req, res) => {
         userName,
         userEmail,
         timestamp,
-        messageText: mateyResponse,
+        messageText: prompt,
         userPrompt: prompt,
       });
     }
