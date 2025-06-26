@@ -458,34 +458,21 @@ app.post('/store-session', async (req, res) => {
         ip: req.ip,
       },
     };
-    if (data.messages && data.messages.length > 0) {
-      if (data.sessionId) {
-        emitNewLiveMessage({
-          sessionId: data.sessionId,
-          userName: data.userName,
-          userEmail: data.userEmail,
-          timestamp: timestamp || new Date(),
-          messageText: mateyResponse,
-          userPrompt: prompt,
-        });
-      }
+    if (messages && messages.length > 0 && sessionId) {
+      emitNewLiveMessage({
+        sessionId,
+        userName,
+        userEmail,
+        timestamp,
+        messageText: mateyResponse,
+        userPrompt: prompt,
+      });
     }
     const [sessionInsert, logInsert] = await Promise.all([
       sessionsStorage.insertOne(sessionData),
       chatLogsStorage.insertOne(logData),
     ]);
     notifyActiveSessionsChanged();
-    if (messages.length > 0) {
-      emitNewLiveMessage({
-        sessionId,
-        userName,
-        userEmail,
-        timestamp: timestamp,
-        messageText: mateyResponse,
-        userPrompt: prompt,
-      });
-    }
-
     res.json({
       success: true,
       sessionId: sessionInsert.insertedId,
@@ -496,6 +483,7 @@ app.post('/store-session', async (req, res) => {
     res.status(500).json({ error: 'Failed to store session' });
   }
 });
+
 // Get chat logs for admin
 app.get('/admin/chat-logs', async (req, res) => {
   try {
