@@ -94,6 +94,7 @@ async function emitNewLiveMessage(messageData) {
       userImage: userDetails ? userDetails.userImage : null,
       timestamp: messageData.timestamp || new Date(),
       messageText: messageData.messageText,
+      sender: messageData.sender,
     };
     io.to('admin-monitoring').emit('new-live-message', payload);
     console.log('📢 Emitted new-live-message to admin-monitoring room:', payload.sessionId);
@@ -153,7 +154,7 @@ app.post('/add-feedback', async (req, res) => {
 });
 app.post('/store-messages', async (req, res) => {
   try {
-    const data = req.body; // { userEmail, userName, messages: [...] }
+    const data = req.body;
     const emailArray = Array.isArray(data.userEmail) ? data.userEmail : [data.userEmail];
     const existingUserMessages = await messagesStorage.findOne({
       userEmail: { $elemMatch: { $in: emailArray } },
@@ -171,23 +172,16 @@ app.post('/store-messages', async (req, res) => {
       result = await messagesStorage.insertOne(data);
       res.send({ inserted: true, result });
     }
-
-    // To emit a new message, we need to know which message is new.
-    // This current structure replaces all messages.
-    // If you want to emit the *last* message from the `data.messages` array:
-    if (data.messages && data.messages.length > 0) {
-      const lastMessage = data.messages[data.messages.length - 1];
-      // Assuming `lastMessage` has a structure like { id, text, sender, timestamp }
-      // And you have a `sessionId` associated with these messages.
-      // This part needs more context on how `sessionId` relates to `messagesStorage`.
-      // For now, let's assume `data` might contain `sessionId`.
-      if (data.sessionId && lastMessage) {
-        emitNewLiveMessage({
-          sessionId: data.sessionId, // You'll need to ensure sessionId is available here
+    if (data.messages && data.messages.length > 0 && data.sessionId) {
+      const relevantMessages = data.messages.filter((msg) => msg.sender === 'user' || msg.sender === 'matey');
+      for (const message of relevantMessages) {
+        await emitNewLiveMessage({
+          sessionId: data.sessionId,
           userName: data.userName,
           userEmail: data.userEmail,
-          timestamp: lastMessage.timestamp || new Date(),
-          messageText: lastMessage.text, // Assuming 'text' field
+          timestamp: message.timestamp || new Date(),
+          messageText: message.text,
+          sender: message.text,
         });
       }
     }
