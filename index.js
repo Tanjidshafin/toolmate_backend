@@ -1,6 +1,10 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const { createClerkClient } = require('@clerk/clerk-sdk-node');
+const clerkClient = createClerkClient({
+  secretKey: process.env.CLERK_SECRET_KEY,
+});
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const OpenAI = require('openai');
 const app = express();
@@ -213,7 +217,7 @@ app.post('/store-suggested-tools', async (req, res) => {
       res.send({ inserted: true, result });
     }
   } catch (error) {
-    console.error('Error storing suggested tools:', error); // Corrected log message
+    console.error('Error storing suggested tools:', error);
     res.status(500).send({ error: 'Internal server error' });
   }
 });
@@ -232,13 +236,14 @@ app.get('/tools/:email', async (req, res) => {
 // Create or update user
 app.post('/store-user', async (req, res) => {
   try {
-    const { userEmail, userName, userImage, isSubscribed, role } = req.body;
+    const { userEmail, userName, userImage, isSubscribed, role, clerkId } = req.body;
     const existingUser = await usersStorage.findOne({ userEmail });
     if (existingUser) {
       const result = await usersStorage.updateOne(
         { userEmail },
         {
           $set: {
+            clerkId,
             userName,
             userImage,
             isSubscribed,
@@ -257,6 +262,7 @@ app.post('/store-user', async (req, res) => {
         role: role || 'user',
         createdAt: new Date(),
         updatedAt: new Date(),
+        clerkId,
       };
       const result = await usersStorage.insertOne(userData);
       res.json({ inserted: true, result });
@@ -316,41 +322,192 @@ app.get('/admin/users', async (req, res) => {
 app.put('/admin/users/:email', async (req, res) => {
   try {
     const { email } = req.params;
-    const { role, isSubscribed } = req.body;
+    const { role, isSubscribed, userEmail, userName, password, isBanned, clerkId } = req.body;
     const updateData = {
       updatedAt: new Date(),
     };
     if (role !== undefined) updateData.role = role;
     if (isSubscribed !== undefined) updateData.isSubscribed = isSubscribed;
+    if (isBanned !== undefined) updateData.isBanned = isBanned;
+    if (userName) updateData.userName = userName;
+    if (userEmail && userEmail !== email) updateData.userEmail = userEmail;
+    if (clerkId && clerkId.trim() !== '') {
+      try {
+        const currentClerkUser = await clerkClient.users.getUser(clerkId);
+        const clerkUpdates = {};
+        if (userName) {
+          const nameParts = userName.split(' ');
+          clerkUpdates.firstName = nameParts[0] || userName;
+          clerkUpdates.lastName = nameParts.slice(1).join(' ') || '';
+        }
+        if (userEmail && userEmail !== email) {
+          try {
+            const newEmailAddress = await clerkClient.emailAddresses.createEmailAddress({
+              userId: clerkId,
+              emailAddress: userEmail,
+              verified: true,
+            });
+            console.log('✅ New email address created:', newEmailAddress.id);
+            await clerkClient.users.updateUser(clerkId, {
+              primaryEmailAddressId: newEmailAddress.id,
+            });
+            const oldEmailAddresses = currentClerkUser.emailAddresses.filter((e) => e.emailAddress === email);
+            for (const oldEmail of oldEmailAddresses) {
+              if (oldEmail.id !== newEmailAddress.id) {
+                try {
+                  await clerkClient.emailAddresses.deleteEmailAddress(oldEmail.id);
+                  console.log('🗑️ Deleted old email address:', oldEmail.emailAddress);
+                } catch (deleteError) {
+                  console.warn('⚠️ Could not delete old email:', deleteError.message);
+                }
+              }
+            }
+          } catch (emailError) {
+            console.error('❌ Email update failed:', emailError);
+          }
+        }
+        if (password) {
+          try {
+            await clerkClient.users.updateUser(clerkId, {
+              password: password,
+            });
+          } catch (passwordError) {
+            console.error('❌ Password update failed:', passwordError);
+            throw new Error(`Password update failed: ${passwordError.message}`);
+          }
+        }
+        if (isBanned !== undefined) {
+          console.log('🚫 Attempting ban status update to:', isBanned);
+          try {
+            await clerkClient.users.updateUser(clerkId, {
+              banned: isBanned,
+            });
+          } catch (banError) {
+            throw new Error(`Ban status update failed: ${banError.message}`);
+          }
+        }
+        if (Object.keys(clerkUpdates).length > 0) {
+          await clerkClient.users.updateUser(clerkId, clerkUpdates);
+        }
+        const updatedClerkUser = await clerkClient.users.getUser(clerkId);
+      } catch (clerkError) {
+        console.error('❌ Clerk update error:', clerkError);
+        return res.status(400).json({
+          error: 'Failed to update user in Clerk',
+          details: clerkError.message || clerkError.toString(),
+        });
+      }
+    }
     const result = await usersStorage.updateOne({ userEmail: email }, { $set: updateData });
     if (result.matchedCount === 0) {
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ error: 'User not found in database' });
     }
-    res.json({ message: 'User updated successfully' });
+    res.json({
+      message: 'User updated successfully',
+      updatedFields: Object.keys(updateData),
+    });
   } catch (error) {
-    console.error('Error updating user:', error);
+    console.error('❌ Error updating user:', error);
     res.status(500).json({ error: 'Failed to update user' });
+  }
+});
+app.put('/admin/users/:email/password', async (req, res) => {
+  try {
+    const { email } = req.params;
+    const { password, clerkId } = req.body;
+    if (!clerkId) {
+      return res.status(400).json({ error: 'Clerk ID is required for password updates' });
+    }
+    if (!password || password.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters long' });
+    }
+    try {
+      const currentUser = await clerkClient.users.getUser(clerkId);
+      await clerkClient.users.updateUser(clerkId, {
+        password: password,
+      });
+      await usersStorage.updateOne(
+        { userEmail: email },
+        {
+          $set: {
+            passwordUpdatedAt: new Date(),
+            updatedAt: new Date(),
+          },
+        }
+      );
+      res.json({ message: 'Password updated successfully' });
+    } catch (clerkError) {
+      console.error('❌ Clerk password update error:', clerkError);
+      res.status(400).json({
+        error: 'Failed to update password in Clerk',
+        details: clerkError.message || clerkError.toString(),
+      });
+    }
+  } catch (error) {
+    console.error('❌ Error updating password:', error);
+    res.status(500).json({ error: 'Failed to update password' });
+  }
+});
+app.put('/admin/users/:email/ban', async (req, res) => {
+  try {
+    const { email } = req.params;
+    const { banned, clerkId } = req.body;
+    if (!clerkId) {
+      return res.status(400).json({ error: 'Clerk ID is required for ban operations' });
+    }
+    if (typeof banned !== 'boolean') {
+      return res.status(400).json({ error: 'Banned status must be a boolean value' });
+    }
+    try {
+      const currentUser = await clerkClient.users.getUser(clerkId);
+      await clerkClient.users.updateUser(clerkId, {
+        banned: banned,
+      });
+      const updatedUser = await clerkClient.users.getUser(clerkId);
+      const result = await usersStorage.updateOne(
+        { userEmail: email },
+        {
+          $set: {
+            isBanned: banned,
+            updatedAt: new Date(),
+            bannedAt: banned ? new Date() : null,
+          },
+        }
+      );
+      if (result.matchedCount === 0) {
+        return res.status(404).json({ error: 'User not found in database' });
+      }
+      res.json({
+        message: `User ${banned ? 'banned' : 'unbanned'} successfully`,
+        banned: banned,
+      });
+    } catch (clerkError) {
+      console.error('❌ Clerk ban update error:', clerkError);
+      res.status(400).json({
+        error: 'Failed to update ban status in Clerk',
+        details: clerkError.message || clerkError.toString(),
+      });
+    }
+  } catch (error) {
+    console.error('❌ Error updating ban status:', error);
+    res.status(500).json({ error: 'Failed to update ban status' });
   }
 });
 app.get('/admin/flagged-messages', async (req, res) => {
   try {
     const { status, page = 1, limit = 20 } = req.query;
     const skip = (page - 1) * limit;
-
     const query = {};
     if (status) {
       query.status = status;
     }
-
     const flaggedMessages = await flaggedMessagesStorage
       .find(query)
       .sort({ flaggedAt: -1 })
       .skip(skip)
       .limit(Number.parseInt(limit))
       .toArray();
-
     const total = await flaggedMessagesStorage.countDocuments(query);
-
     res.json({
       flaggedMessages,
       pagination: {
