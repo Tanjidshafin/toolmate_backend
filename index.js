@@ -94,7 +94,7 @@ async function emitNewLiveMessage(messageData) {
       userImage: userDetails ? userDetails.userImage : null,
       timestamp: messageData.timestamp || new Date(),
       messageText: messageData.messageText,
-      sender: messageData.sender,
+      prompt: messageData.userPrompt,
     };
     io.to('admin-monitoring').emit('new-live-message', payload);
     console.log('📢 Emitted new-live-message to admin-monitoring room:', payload.sessionId);
@@ -154,7 +154,7 @@ app.post('/add-feedback', async (req, res) => {
 });
 app.post('/store-messages', async (req, res) => {
   try {
-    const data = req.body;
+    const data = req.body; // { userEmail, userName, messages: [...] }
     const emailArray = Array.isArray(data.userEmail) ? data.userEmail : [data.userEmail];
     const existingUserMessages = await messagesStorage.findOne({
       userEmail: { $elemMatch: { $in: emailArray } },
@@ -171,19 +171,6 @@ app.post('/store-messages', async (req, res) => {
     } else {
       result = await messagesStorage.insertOne(data);
       res.send({ inserted: true, result });
-    }
-    if (data.messages && data.messages.length > 0 && data.sessionId) {
-      const relevantMessages = data.messages.filter((msg) => msg.sender === 'user' || msg.sender === 'matey');
-      for (const message of relevantMessages) {
-        await emitNewLiveMessage({
-          sessionId: data.sessionId,
-          userName: data.userName,
-          userEmail: data.userEmail,
-          timestamp: message.timestamp || new Date(),
-          messageText: message.text,
-          sender: message.text,
-        });
-      }
     }
   } catch (error) {
     console.error('Error storing messages:', error);
@@ -471,19 +458,31 @@ app.post('/store-session', async (req, res) => {
         ip: req.ip,
       },
     };
+    if (data.messages && data.messages.length > 0) {
+      if (data.sessionId) {
+        emitNewLiveMessage({
+          sessionId: data.sessionId,
+          userName: data.userName,
+          userEmail: data.userEmail,
+          timestamp: timestamp || new Date(),
+          messageText: mateyResponse,
+          userPrompt: prompt,
+        });
+      }
+    }
     const [sessionInsert, logInsert] = await Promise.all([
       sessionsStorage.insertOne(sessionData),
       chatLogsStorage.insertOne(logData),
     ]);
     notifyActiveSessionsChanged();
     if (messages.length > 0) {
-      const lastMessage = messages[messages.length - 1];
       emitNewLiveMessage({
         sessionId,
         userName,
         userEmail,
-        timestamp: lastMessage.timestamp || timestamp,
-        messageText: lastMessage.text,
+        timestamp: timestamp,
+        messageText: mateyResponse,
+        userPrompt: prompt,
       });
     }
 
