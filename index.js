@@ -498,8 +498,6 @@ app.get('/admin/flagged-messages', async (req, res) => {
     const { status, page = 1, limit = 20 } = req.query;
     const skip = (page - 1) * limit;
     const query = {
-      softDeleted: { $ne: true },
-      archived: { $ne: true },
       $or: [{ expiresAt: { $exists: false } }, { expiresAt: { $gt: new Date() } }],
     };
     if (status && status !== 'all') {
