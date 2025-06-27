@@ -115,8 +115,6 @@ function notifyActiveSessionsChanged() {
 app.get('/', (req, res) => {
   res.send('Welcome to Toolmate');
 });
-
-// Store and fetch feedbacks
 app.post('/add-feedback', async (req, res) => {
   try {
     const data = req.body;
@@ -147,6 +145,8 @@ app.post('/add-feedback', async (req, res) => {
           flaggedAt: new Date(),
           reviewedAt: null,
           reviewedBy: null,
+          softDeleted: false,
+          archived: false,
         });
       }
       res.status(200).send(result);
@@ -497,9 +497,13 @@ app.get('/admin/flagged-messages', async (req, res) => {
   try {
     const { status, page = 1, limit = 20 } = req.query;
     const skip = (page - 1) * limit;
-    const query = {};
-    if (status) {
-      query.status = status;
+    const query = {
+      softDeleted: { $ne: true },
+      archived: { $ne: true },
+      $or: [{ expiresAt: { $exists: false } }, { expiresAt: { $gt: new Date() } }],
+    };
+    if (status && status !== 'all') {
+      query.status = status.toLowerCase();
     }
     const flaggedMessages = await flaggedMessagesStorage
       .find(query)
@@ -521,24 +525,74 @@ app.get('/admin/flagged-messages', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch flagged messages' });
   }
 });
+// Add cleanup job for expired messages (run this periodically)
+app.post('/admin/cleanup-expired-messages', async (req, res) => {
+  try {
+    const now = new Date();
+    const result = await flaggedMessagesStorage.deleteMany({
+      expiresAt: { $lt: now },
+    });
+    res.json({
+      message: `Cleaned up ${result.deletedCount} expired messages`,
+      deletedCount: result.deletedCount,
+    });
+  } catch (error) {
+    console.error('Error cleaning up expired messages:', error);
+    res.status(500).json({ error: 'Failed to cleanup expired messages' });
+  }
+});
 app.put('/admin/flagged-messages/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { status, adminComments, reviewedBy } = req.body;
-
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ error: 'Invalid message ID format' });
+    }
+    const currentMessage = await flaggedMessagesStorage.findOne({ _id: new ObjectId(id) });
+    if (!currentMessage) {
+      return res.status(404).json({ error: 'Flagged message not found' });
+    }
+    const validTransitions = {
+      pending: ['approved', 'rejected'],
+      approved: ['resolved'],
+      rejected: [],
+      resolved: [],
+    };
+    const allowedTransitions = validTransitions[currentMessage.status] || [];
+    if (!allowedTransitions.includes(status)) {
+      return res.status(400).json({
+        error: `Invalid status transition from ${currentMessage.status} to ${status}`,
+      });
+    }
+    if (status === 'approved' && (!adminComments || !adminComments.trim())) {
+      return res.status(400).json({
+        error: 'Admin comment is required when approving a message',
+      });
+    }
     const updateData = {
-      status,
+      status: status.toLowerCase(),
       adminComments,
       reviewedAt: new Date(),
       reviewedBy: reviewedBy || 'admin',
     };
-
+    if (status === 'rejected') {
+      updateData.softDeleted = true;
+      updateData.softDeletedAt = new Date();
+      const expiryDate = new Date();
+      expiryDate.setDate(expiryDate.getDate() + 60);
+      updateData.expiresAt = expiryDate;
+    }
+    if (status === 'resolved') {
+      updateData.archived = true;
+      updateData.archivedAt = new Date();
+      const expiryDate = new Date();
+      expiryDate.setDate(expiryDate.getDate() + 60);
+      updateData.expiresAt = expiryDate;
+    }
     const result = await flaggedMessagesStorage.updateOne({ _id: new ObjectId(id) }, { $set: updateData });
-
     if (result.matchedCount === 0) {
       return res.status(404).json({ error: 'Flagged message not found' });
     }
-
     res.json({ message: 'Flagged message updated successfully' });
   } catch (error) {
     console.error('Error updating flagged message:', error);
@@ -569,6 +623,23 @@ app.get('/admin/flagged-messages/:id/context', async (req, res) => {
   } catch (error) {
     console.error('Error fetching session context:', error);
     res.status(500).json({ error: 'Failed to fetch session context' });
+  }
+});
+// DELETE flagged messages
+app.delete('/admin/flagged-messages/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ error: 'Invalid message ID format' });
+    }
+    const result = await flaggedMessagesStorage.deleteOne({ _id: new ObjectId(id) });
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ error: 'Flagged message not found' });
+    }
+    res.json({ message: 'Flagged message deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting flagged message:', error);
+    res.status(500).json({ error: 'Failed to delete flagged message' });
   }
 });
 app.post('/store-session', async (req, res) => {
