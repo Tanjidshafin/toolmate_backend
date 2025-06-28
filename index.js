@@ -600,19 +600,43 @@ app.put('/admin/flagged-messages/:id', async (req, res) => {
 app.get('/admin/flagged-messages/:id/context', async (req, res) => {
   try {
     const { id } = req.params;
-
     const flaggedMessage = await flaggedMessagesStorage.findOne({ _id: new ObjectId(id) });
     if (!flaggedMessage) {
       return res.status(404).json({ error: 'Flagged message not found' });
     }
-    const session = await sessionsStorage.findOne({
-      userEmail: { $in: flaggedMessage.userEmail },
-      'messages.id': flaggedMessage.messageId,
-    });
-    const user = await usersStorage.findOne({
-      userEmail: { $in: flaggedMessage.userEmail },
-    });
-
+    let session = null;
+    let user = null;
+    if (flaggedMessage.userEmail) {
+      const userEmailToSearch = Array.isArray(flaggedMessage.userEmail)
+        ? flaggedMessage.userEmail[0]
+        : flaggedMessage.userEmail;
+      session = await sessionsStorage.findOne({
+        $or: [
+          { userEmail: userEmailToSearch },
+          {
+            userEmail: {
+              $in: Array.isArray(flaggedMessage.userEmail) ? flaggedMessage.userEmail : [flaggedMessage.userEmail],
+            },
+          },
+        ],
+        'messages.id': flaggedMessage.messageId,
+      });
+      user = await usersStorage.findOne({
+        $or: [
+          { userEmail: userEmailToSearch },
+          {
+            userEmail: {
+              $in: Array.isArray(flaggedMessage.userEmail) ? flaggedMessage.userEmail : [flaggedMessage.userEmail],
+            },
+          },
+        ],
+      });
+    } else {
+      session = await sessionsStorage.findOne({
+        'messages.id': flaggedMessage.messageId,
+      });
+      user = null;
+    }
     res.json({
       flaggedMessage,
       sessionContext: session || null,
