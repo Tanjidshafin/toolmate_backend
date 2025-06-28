@@ -71,19 +71,68 @@ io.on('connection', (socket) => {
     socket.join('admin-monitoring');
   });
   socket.on('inject-message', async (data) => {
-    io.to(data.sessionId).emit('admin-message', {
-      message: data.message,
-      timestamp: new Date(),
-      sender: 'admin',
-    });
-    io.to('admin-monitoring').emit('injected-message-confirmation', {
-      sessionId: data.sessionId,
-      message: data.message,
-      timestamp: new Date(),
-      sender: 'admin',
-      status: 'sent',
-    });
-    console.log(`📤 Admin ${socket.id} injected message to session ${data.sessionId}`);
+    try {
+      // Send the message to the specific session
+      io.to(data.sessionId).emit('admin-message', {
+        message: data.message,
+        timestamp: new Date(),
+        sender: 'admin',
+      });
+
+      // Look up user details for this session
+      let userDetails = null;
+
+      // First try to find in recent chat logs
+      const recentSession = await chatLogsStorage.findOne({ sessionId: data.sessionId }, { sort: { timestamp: -1 } });
+
+      if (recentSession) {
+        userDetails = {
+          userEmail: recentSession.userEmail,
+          userName: recentSession.userName,
+        };
+      } else {
+        // Fallback to sessions collection
+        const session = await sessionsStorage.findOne({ sessionId: data.sessionId }, { sort: { timestamp: -1 } });
+
+        if (session) {
+          userDetails = {
+            userEmail: session.userEmail,
+            userName: session.userName,
+          };
+        }
+      }
+
+      // Send confirmation to admin monitoring room with user details
+      io.to('admin-monitoring').emit('injected-message-confirmation', {
+        sessionId: data.sessionId,
+        message: data.message,
+        timestamp: new Date(),
+        sender: 'admin',
+        status: 'sent',
+        userEmail: userDetails?.userEmail || 'Unknown',
+        userName: userDetails?.userName || 'Unknown User',
+      });
+
+      console.log(
+        `📤 Admin ${socket.id} injected message to session ${data.sessionId} for user ${
+          userDetails?.userName || 'Unknown'
+        }`
+      );
+    } catch (error) {
+      console.error('Error injecting message:', error);
+
+      // Send error confirmation to admin
+      io.to('admin-monitoring').emit('injected-message-confirmation', {
+        sessionId: data.sessionId,
+        message: data.message,
+        timestamp: new Date(),
+        sender: 'admin',
+        status: 'error',
+        error: 'Failed to inject message',
+        userEmail: 'Unknown',
+        userName: 'Unknown User',
+      });
+    }
   });
   socket.on('disconnect', (reason) => {
     console.log('❌ Admin disconnected from monitoring:', socket.id, 'Reason:', reason);
