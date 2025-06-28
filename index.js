@@ -76,6 +76,13 @@ io.on('connection', (socket) => {
       timestamp: new Date(),
       sender: 'admin',
     });
+    io.to('admin-monitoring').emit('injected-message-confirmation', {
+      sessionId: data.sessionId,
+      message: data.message,
+      timestamp: new Date(),
+      sender: 'admin',
+      status: 'sent',
+    });
     console.log(`📤 Admin ${socket.id} injected message to session ${data.sessionId}`);
   });
   socket.on('disconnect', (reason) => {
