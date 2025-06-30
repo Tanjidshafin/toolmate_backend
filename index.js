@@ -1435,6 +1435,172 @@ app.post('/shed/check-ownership', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
+app.get("/admin/shed-analytics", async (req, res) => {
+  try {
+    const { page = 1, limit = 50, action, userId, dateFrom, dateTo } = req.query
+    const skip = (page - 1) * limit
+
+    const query = { collection: "shed_analytics" }
+
+    if (action) query.action = action
+    if (userId) query.user_id = userId
+
+    if (dateFrom || dateTo) {
+      query.timestamp = {}
+      if (dateFrom) query.timestamp.$gte = new Date(dateFrom)
+      if (dateTo) query.timestamp.$lte = new Date(dateTo)
+    }
+
+    const analytics = await shedToolsStorage
+      .find(query)
+      .sort({ timestamp: -1 })
+      .skip(skip)
+      .limit(Number.parseInt(limit))
+      .toArray()
+
+    const total = await shedToolsStorage.countDocuments(query)
+
+    // Get summary stats
+    const stats = await shedToolsStorage
+      .aggregate([
+        { $match: { collection: "shed_analytics" } },
+        {
+          $group: {
+            _id: "$action",
+            count: { $sum: 1 },
+          },
+        },
+      ])
+      .toArray()
+
+    // Get most popular tools
+    const popularTools = await shedToolsStorage
+      .aggregate([
+        {
+          $match: {
+            collection: "shed_analytics",
+            action: "tool_added",
+          },
+        },
+        {
+          $group: {
+            _id: "$tool_name",
+            count: { $sum: 1 },
+            category: { $first: "$category" },
+          },
+        },
+        { $sort: { count: -1 } },
+        { $limit: 10 },
+      ])
+      .toArray()
+
+    res.json({
+      success: true,
+      analytics: analytics,
+      stats: stats.reduce((acc, stat) => {
+        acc[stat._id] = stat.count
+        return acc
+      }, {}),
+      popularTools: popularTools,
+      pagination: {
+        current: Number.parseInt(page),
+        total: Math.ceil(total / limit),
+        count: total,
+      },
+    })
+  } catch (error) {
+    console.error("Error fetching shed analytics:", error)
+    res.status(500).json({ success: false, error: error.message })
+  }
+})
+
+// Get shed statistics for admin dashboard
+app.get("/admin/shed-stats", async (req, res) => {
+  try {
+    const totalTools = await shedToolsStorage.countDocuments({
+      collection: { $ne: "shed_analytics" },
+    })
+
+    const totalUsers = await shedToolsStorage.distinct("user_id", {
+      collection: { $ne: "shed_analytics" },
+    })
+
+    const categoryStats = await shedToolsStorage
+      .aggregate([
+        { $match: { collection: { $ne: "shed_analytics" } } },
+        {
+          $group: {
+            _id: "$category",
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { count: -1 } },
+      ])
+      .toArray()
+
+    const averageToolsPerUser = totalUsers.length > 0 ? totalTools / totalUsers.length : 0
+
+    res.json({
+      success: true,
+      stats: {
+        totalTools: totalTools,
+        totalUsersWithTools: totalUsers.length,
+        averageToolsPerUser: Math.round(averageToolsPerUser * 100) / 100,
+        categoryBreakdown: categoryStats,
+      },
+    })
+  } catch (error) {
+    console.error("Error fetching shed statistics:", error)
+    res.status(500).json({ success: false, error: error.message })
+  }
+})
+
+// Bulk add tools to shed (for migration or admin purposes)
+app.post("/shed/bulk-add", async (req, res) => {
+  try {
+    const { userId, tools } = req.body
+
+    if (!userId || !Array.isArray(tools) || tools.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "User ID and tools array are required",
+      })
+    }
+
+    const toolsToInsert = tools.map((tool) => ({
+      user_id: userId,
+      tool_name: tool.name || tool.toolName,
+      category: tool.category || "Other",
+      date_added: new Date(),
+      source: tool.source || "bulk_import",
+      original_phrase: tool.originalPhrase || "",
+      last_updated: new Date(),
+      note: tool.note || "",
+    }))
+
+    const result = await shedToolsStorage.insertMany(toolsToInsert)
+
+    // Log analytics
+    await shedToolsStorage.insertOne({
+      collection: "shed_analytics",
+      user_id: userId,
+      action: "bulk_import",
+      tools_count: toolsToInsert.length,
+      timestamp: new Date(),
+      source: "admin",
+    })
+
+    res.json({
+      success: true,
+      message: `${result.insertedCount} tools added to shed successfully`,
+      insertedCount: result.insertedCount,
+      toolIds: result.insertedIds,
+    })
+  } catch (error) {
+    console.error("Error bulk adding tools to shed:", error)
+    res.status(500).json({ success: false, error: error.message })
+  }
+})
 app.use((req, res) => {
   res.status(404).send({ error: 'Not Found' });
 });
