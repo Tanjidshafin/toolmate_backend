@@ -39,6 +39,7 @@ let sessionsStorage;
 let redirectTrackingStorage;
 let ragSystemStorage;
 let chatLogsStorage;
+let shedToolsStorage;
 async function run() {
   try {
     await client.connect();
@@ -53,6 +54,7 @@ async function run() {
     redirectTrackingStorage = client.db('Toolmate').collection('RedirectTracking');
     ragSystemStorage = client.db('Toolmate').collection('RagSystemStorage');
     chatLogsStorage = client.db('Toolmate').collection('ChatLogsStorage');
+    shedToolsStorage = client.db('Toolmate').collection('ShedTools');
     server.listen(PORT, () => {
       console.log(`🚀 Server is running on port ${PORT}`);
       console.log(`🔌 Socket.io server is ready`);
@@ -72,28 +74,20 @@ io.on('connection', (socket) => {
   });
   socket.on('inject-message', async (data) => {
     try {
-      // Send the message to the specific session
       io.to(data.sessionId).emit('admin-message', {
         message: data.message,
         timestamp: new Date(),
         sender: 'admin',
       });
-
-      // Look up user details for this session
       let userDetails = null;
-
-      // First try to find in recent chat logs
       const recentSession = await chatLogsStorage.findOne({ sessionId: data.sessionId }, { sort: { timestamp: -1 } });
-
       if (recentSession) {
         userDetails = {
           userEmail: recentSession.userEmail,
           userName: recentSession.userName,
         };
       } else {
-        // Fallback to sessions collection
         const session = await sessionsStorage.findOne({ sessionId: data.sessionId }, { sort: { timestamp: -1 } });
-
         if (session) {
           userDetails = {
             userEmail: session.userEmail,
@@ -101,8 +95,6 @@ io.on('connection', (socket) => {
           };
         }
       }
-
-      // Send confirmation to admin monitoring room with user details
       io.to('admin-monitoring').emit('injected-message-confirmation', {
         sessionId: data.sessionId,
         message: data.message,
@@ -112,7 +104,6 @@ io.on('connection', (socket) => {
         userEmail: userDetails?.userEmail || 'Unknown',
         userName: userDetails?.userName || 'Unknown User',
       });
-
       console.log(
         `📤 Admin ${socket.id} injected message to session ${data.sessionId} for user ${
           userDetails?.userName || 'Unknown'
@@ -120,8 +111,6 @@ io.on('connection', (socket) => {
       );
     } catch (error) {
       console.error('Error injecting message:', error);
-
-      // Send error confirmation to admin
       io.to('admin-monitoring').emit('injected-message-confirmation', {
         sessionId: data.sessionId,
         message: data.message,
@@ -1225,6 +1214,225 @@ app.post('/api/v1/admin/login', (req, res) => {
       success: false,
       message: 'Internal server error',
     });
+  }
+});
+app.get('/shed/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const tools = await shedToolsStorage.find({ user_id: userId }).sort({ date_added: -1 }).toArray();
+    const groupedTools = tools.reduce((acc, tool) => {
+      const category = tool.category || 'Other';
+      if (!acc[category]) {
+        acc[category] = [];
+      }
+      acc[category].push(tool);
+      return acc;
+    }, {});
+    res.json({
+      success: true,
+      tools: tools,
+      groupedTools: groupedTools,
+      totalCount: tools.length,
+    });
+  } catch (error) {
+    console.error('Error fetching shed tools:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+app.post('/shed/add', async (req, res) => {
+  try {
+    const { userId, toolName, category, originalPhrase, source } = req.body;
+    if (!userId || !toolName) {
+      return res.status(400).json({
+        success: false,
+        error: 'User ID and tool name are required',
+      });
+    }
+    const existingTool = await shedToolsStorage.findOne({
+      user_id: userId,
+      tool_name: { $regex: new RegExp(`^${toolName}$`, 'i') },
+    });
+    if (existingTool) {
+      return res.json({
+        success: true,
+        message: 'Tool already in shed',
+        toolId: existingTool._id,
+      });
+    }
+    const toolData = {
+      user_id: userId,
+      tool_name: toolName,
+      category: category || 'Other',
+      date_added: new Date(),
+      source: source || 'chat',
+      original_phrase: originalPhrase || '',
+      last_updated: new Date(),
+      note: '',
+    };
+    const result = await shedToolsStorage.insertOne(toolData);
+    await shedToolsStorage.insertOne({
+      collection: 'shed_analytics',
+      user_id: userId,
+      action: 'tool_added',
+      tool_name: toolName,
+      category: category || 'Other',
+      timestamp: new Date(),
+      source: source || 'chat',
+    });
+    res.json({
+      success: true,
+      toolId: result.insertedId,
+      message: 'Tool added to shed successfully',
+      tool: { ...toolData, _id: result.insertedId },
+    });
+  } catch (error) {
+    console.error('Error adding tool to shed:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+app.delete('/shed/remove/:toolId', async (req, res) => {
+  try {
+    const { toolId } = req.params;
+    if (!ObjectId.isValid(toolId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid tool ID format',
+      });
+    }
+    const toolDoc = await shedToolsStorage.findOne({ _id: new ObjectId(toolId) });
+    if (!toolDoc) {
+      return res.status(404).json({
+        success: false,
+        error: 'Tool not found in shed',
+      });
+    }
+    const result = await shedToolsStorage.deleteOne({ _id: new ObjectId(toolId) });
+    await shedToolsStorage.insertOne({
+      collection: 'shed_analytics',
+      user_id: toolDoc.user_id,
+      action: 'tool_removed',
+      tool_name: toolDoc.tool_name,
+      category: toolDoc.category,
+      timestamp: new Date(),
+      source: 'manual',
+    });
+    res.json({
+      success: true,
+      message: 'Tool removed from shed successfully',
+      removedTool: toolDoc.tool_name,
+    });
+  } catch (error) {
+    console.error('Error removing tool from shed:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+app.put('/shed/update/:toolId', async (req, res) => {
+  try {
+    const { toolId } = req.params;
+    const { toolName, category, note } = req.body;
+    if (!ObjectId.isValid(toolId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid tool ID format',
+      });
+    }
+    const updateData = {
+      last_updated: new Date(),
+    };
+    if (toolName) updateData.tool_name = toolName;
+    if (category) updateData.category = category;
+    if (note !== undefined) updateData.note = note;
+    const result = await shedToolsStorage.updateOne({ _id: new ObjectId(toolId) }, { $set: updateData });
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Tool not found in shed',
+      });
+    }
+    const updatedTool = await shedToolsStorage.findOne({ _id: new ObjectId(toolId) });
+    res.json({
+      success: true,
+      message: 'Tool updated successfully',
+      tool: updatedTool,
+    });
+  } catch (error) {
+    console.error('Error updating tool in shed:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete('/shed/clear/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: 'User ID is required',
+      });
+    }
+    const tools = await shedToolsStorage.find({ user_id: userId }).toArray();
+    const toolCount = tools.length;
+    if (toolCount === 0) {
+      return res.json({
+        success: true,
+        message: 'Shed is already empty',
+        toolsRemoved: 0,
+      });
+    }
+    const result = await shedToolsStorage.deleteMany({ user_id: userId });
+    await shedToolsStorage.insertOne({
+      collection: 'shed_analytics',
+      user_id: userId,
+      action: 'shed_cleared',
+      tools_count: toolCount,
+      timestamp: new Date(),
+      source: 'manual',
+    });
+
+    res.json({
+      success: true,
+      message: 'Shed cleared successfully',
+      toolsRemoved: result.deletedCount,
+    });
+  } catch (error) {
+    console.error('Error clearing shed:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+app.post('/shed/check-ownership', async (req, res) => {
+  try {
+    const { userId, toolNames } = req.body;
+    if (!userId || !Array.isArray(toolNames)) {
+      return res.status(400).json({
+        success: false,
+        error: 'User ID and tool names array are required',
+      });
+    }
+    const ownedTools = await shedToolsStorage
+      .find({
+        user_id: userId,
+        tool_name: { $in: toolNames.map((name) => new RegExp(name, 'i')) },
+      })
+      .toArray();
+    const ownedToolNames = ownedTools.map((tool) => tool.tool_name.toLowerCase());
+    const ownership = toolNames.reduce((acc, toolName) => {
+      acc[toolName] = ownedToolNames.some(
+        (owned) => owned.includes(toolName.toLowerCase()) || toolName.toLowerCase().includes(owned)
+      );
+      return acc;
+    }, {});
+    res.json({
+      success: true,
+      ownership: ownership,
+      ownedTools: ownedTools.map((tool) => ({
+        id: tool._id,
+        name: tool.tool_name,
+        category: tool.category,
+      })),
+    });
+  } catch (error) {
+    console.error('Error checking tool ownership:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 app.use((req, res) => {
