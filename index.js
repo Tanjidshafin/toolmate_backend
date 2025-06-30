@@ -1216,29 +1216,6 @@ app.post('/api/v1/admin/login', (req, res) => {
     });
   }
 });
-app.get('/shed/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const tools = await shedToolsStorage.find({ user_id: userId }).sort({ date_added: -1 }).toArray();
-    const groupedTools = tools.reduce((acc, tool) => {
-      const category = tool.category || 'Other';
-      if (!acc[category]) {
-        acc[category] = [];
-      }
-      acc[category].push(tool);
-      return acc;
-    }, {});
-    res.json({
-      success: true,
-      tools: tools,
-      groupedTools: groupedTools,
-      totalCount: tools.length,
-    });
-  } catch (error) {
-    console.error('Error fetching shed tools:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
 app.post('/shed/add', async (req, res) => {
   try {
     const { userId, toolName, category, originalPhrase, source } = req.body;
@@ -1248,9 +1225,11 @@ app.post('/shed/add', async (req, res) => {
         error: 'User ID and tool name are required',
       });
     }
+    await new Promise((resolve) => setTimeout(resolve, 100));
     const existingTool = await shedToolsStorage.findOne({
       user_id: userId,
       tool_name: { $regex: new RegExp(`^${toolName}$`, 'i') },
+      collection: { $ne: 'shed_analytics' },
     });
     if (existingTool) {
       return res.json({
@@ -1270,15 +1249,19 @@ app.post('/shed/add', async (req, res) => {
       note: '',
     };
     const result = await shedToolsStorage.insertOne(toolData);
-    await shedToolsStorage.insertOne({
-      collection: 'shed_analytics',
-      user_id: userId,
-      action: 'tool_added',
-      tool_name: toolName,
-      category: category || 'Other',
-      timestamp: new Date(),
-      source: source || 'chat',
-    });
+    try {
+      await shedToolsStorage.insertOne({
+        collection: 'shed_analytics',
+        user_id: userId,
+        action: 'tool_added',
+        tool_name: toolName,
+        category: category || 'Other',
+        timestamp: new Date(),
+        source: source || 'chat',
+      });
+    } catch (analyticsError) {
+      console.warn('Analytics insertion failed:', analyticsError);
+    }
     res.json({
       success: true,
       toolId: result.insertedId,
@@ -1293,29 +1276,46 @@ app.post('/shed/add', async (req, res) => {
 app.delete('/shed/remove/:toolId', async (req, res) => {
   try {
     const { toolId } = req.params;
+
     if (!ObjectId.isValid(toolId)) {
       return res.status(400).json({
         success: false,
         error: 'Invalid tool ID format',
       });
     }
-    const toolDoc = await shedToolsStorage.findOne({ _id: new ObjectId(toolId) });
+    const toolDoc = await shedToolsStorage.findOne({
+      _id: new ObjectId(toolId),
+      collection: { $ne: 'shed_analytics' },
+    });
     if (!toolDoc) {
       return res.status(404).json({
         success: false,
         error: 'Tool not found in shed',
       });
     }
-    const result = await shedToolsStorage.deleteOne({ _id: new ObjectId(toolId) });
-    await shedToolsStorage.insertOne({
-      collection: 'shed_analytics',
-      user_id: toolDoc.user_id,
-      action: 'tool_removed',
-      tool_name: toolDoc.tool_name,
-      category: toolDoc.category,
-      timestamp: new Date(),
-      source: 'manual',
+    const result = await shedToolsStorage.deleteOne({
+      _id: new ObjectId(toolId),
+      collection: { $ne: 'shed_analytics' },
     });
+    if (result.deletedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Tool not found or could not be deleted',
+      });
+    }
+    try {
+      await shedToolsStorage.insertOne({
+        collection: 'shed_analytics',
+        user_id: toolDoc.user_id,
+        action: 'tool_removed',
+        tool_name: toolDoc.tool_name,
+        category: toolDoc.category,
+        timestamp: new Date(),
+        source: 'manual',
+      });
+    } catch (analyticsError) {
+      console.warn('Analytics insertion failed:', analyticsError);
+    }
     res.json({
       success: true,
       message: 'Tool removed from shed successfully',
@@ -1323,6 +1323,36 @@ app.delete('/shed/remove/:toolId', async (req, res) => {
     });
   } catch (error) {
     console.error('Error removing tool from shed:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+app.get('/shed/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    const tools = await shedToolsStorage
+      .find({
+        user_id: userId,
+        collection: { $ne: 'shed_analytics' },
+      })
+      .sort({ date_added: -1 })
+      .toArray();
+    const groupedTools = tools.reduce((acc, tool) => {
+      const category = tool.category || 'Other';
+      if (!acc[category]) {
+        acc[category] = [];
+      }
+      acc[category].push(tool);
+      return acc;
+    }, {});
+    res.json({
+      success: true,
+      tools: tools,
+      groupedTools: groupedTools,
+      totalCount: tools.length,
+    });
+  } catch (error) {
+    console.error('Error fetching shed tools:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -1435,20 +1465,20 @@ app.post('/shed/check-ownership', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
-app.get("/admin/shed-analytics", async (req, res) => {
+app.get('/admin/shed-analytics', async (req, res) => {
   try {
-    const { page = 1, limit = 50, action, userId, dateFrom, dateTo } = req.query
-    const skip = (page - 1) * limit
+    const { page = 1, limit = 50, action, userId, dateFrom, dateTo } = req.query;
+    const skip = (page - 1) * limit;
 
-    const query = { collection: "shed_analytics" }
+    const query = { collection: 'shed_analytics' };
 
-    if (action) query.action = action
-    if (userId) query.user_id = userId
+    if (action) query.action = action;
+    if (userId) query.user_id = userId;
 
     if (dateFrom || dateTo) {
-      query.timestamp = {}
-      if (dateFrom) query.timestamp.$gte = new Date(dateFrom)
-      if (dateTo) query.timestamp.$lte = new Date(dateTo)
+      query.timestamp = {};
+      if (dateFrom) query.timestamp.$gte = new Date(dateFrom);
+      if (dateTo) query.timestamp.$lte = new Date(dateTo);
     }
 
     const analytics = await shedToolsStorage
@@ -1456,50 +1486,45 @@ app.get("/admin/shed-analytics", async (req, res) => {
       .sort({ timestamp: -1 })
       .skip(skip)
       .limit(Number.parseInt(limit))
-      .toArray()
-
-    const total = await shedToolsStorage.countDocuments(query)
-
-    // Get summary stats
+      .toArray();
+    const total = await shedToolsStorage.countDocuments(query);
     const stats = await shedToolsStorage
       .aggregate([
-        { $match: { collection: "shed_analytics" } },
+        { $match: { collection: 'shed_analytics' } },
         {
           $group: {
-            _id: "$action",
+            _id: '$action',
             count: { $sum: 1 },
           },
         },
       ])
-      .toArray()
-
-    // Get most popular tools
+      .toArray();
     const popularTools = await shedToolsStorage
       .aggregate([
         {
           $match: {
-            collection: "shed_analytics",
-            action: "tool_added",
+            collection: 'shed_analytics',
+            action: 'tool_added',
           },
         },
         {
           $group: {
-            _id: "$tool_name",
+            _id: '$tool_name',
             count: { $sum: 1 },
-            category: { $first: "$category" },
+            category: { $first: '$category' },
           },
         },
         { $sort: { count: -1 } },
         { $limit: 10 },
       ])
-      .toArray()
+      .toArray();
 
     res.json({
       success: true,
       analytics: analytics,
       stats: stats.reduce((acc, stat) => {
-        acc[stat._id] = stat.count
-        return acc
+        acc[stat._id] = stat.count;
+        return acc;
       }, {}),
       popularTools: popularTools,
       pagination: {
@@ -1507,39 +1532,36 @@ app.get("/admin/shed-analytics", async (req, res) => {
         total: Math.ceil(total / limit),
         count: total,
       },
-    })
+    });
   } catch (error) {
-    console.error("Error fetching shed analytics:", error)
-    res.status(500).json({ success: false, error: error.message })
+    console.error('Error fetching shed analytics:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
-})
-
+});
 // Get shed statistics for admin dashboard
-app.get("/admin/shed-stats", async (req, res) => {
+app.get('/admin/shed-stats', async (req, res) => {
   try {
     const totalTools = await shedToolsStorage.countDocuments({
-      collection: { $ne: "shed_analytics" },
-    })
+      collection: { $ne: 'shed_analytics' },
+    });
 
-    const totalUsers = await shedToolsStorage.distinct("user_id", {
-      collection: { $ne: "shed_analytics" },
-    })
+    const totalUsers = await shedToolsStorage.distinct('user_id', {
+      collection: { $ne: 'shed_analytics' },
+    });
 
     const categoryStats = await shedToolsStorage
       .aggregate([
-        { $match: { collection: { $ne: "shed_analytics" } } },
+        { $match: { collection: { $ne: 'shed_analytics' } } },
         {
           $group: {
-            _id: "$category",
+            _id: '$category',
             count: { $sum: 1 },
           },
         },
         { $sort: { count: -1 } },
       ])
-      .toArray()
-
-    const averageToolsPerUser = totalUsers.length > 0 ? totalTools / totalUsers.length : 0
-
+      .toArray();
+    const averageToolsPerUser = totalUsers.length > 0 ? totalTools / totalUsers.length : 0;
     res.json({
       success: true,
       stats: {
@@ -1548,63 +1570,58 @@ app.get("/admin/shed-stats", async (req, res) => {
         averageToolsPerUser: Math.round(averageToolsPerUser * 100) / 100,
         categoryBreakdown: categoryStats,
       },
-    })
+    });
   } catch (error) {
-    console.error("Error fetching shed statistics:", error)
-    res.status(500).json({ success: false, error: error.message })
+    console.error('Error fetching shed statistics:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
-})
-
+});
 // Bulk add tools to shed (for migration or admin purposes)
-app.post("/shed/bulk-add", async (req, res) => {
+app.post('/shed/bulk-add', async (req, res) => {
   try {
-    const { userId, tools } = req.body
+    const { userId, tools } = req.body;
 
     if (!userId || !Array.isArray(tools) || tools.length === 0) {
       return res.status(400).json({
         success: false,
-        error: "User ID and tools array are required",
-      })
+        error: 'User ID and tools array are required',
+      });
     }
 
     const toolsToInsert = tools.map((tool) => ({
       user_id: userId,
       tool_name: tool.name || tool.toolName,
-      category: tool.category || "Other",
+      category: tool.category || 'Other',
       date_added: new Date(),
-      source: tool.source || "bulk_import",
-      original_phrase: tool.originalPhrase || "",
+      source: tool.source || 'bulk_import',
+      original_phrase: tool.originalPhrase || '',
       last_updated: new Date(),
-      note: tool.note || "",
-    }))
-
-    const result = await shedToolsStorage.insertMany(toolsToInsert)
-
+      note: tool.note || '',
+    }));
+    const result = await shedToolsStorage.insertMany(toolsToInsert);
     // Log analytics
     await shedToolsStorage.insertOne({
-      collection: "shed_analytics",
+      collection: 'shed_analytics',
       user_id: userId,
-      action: "bulk_import",
+      action: 'bulk_import',
       tools_count: toolsToInsert.length,
       timestamp: new Date(),
-      source: "admin",
-    })
-
+      source: 'admin',
+    });
     res.json({
       success: true,
       message: `${result.insertedCount} tools added to shed successfully`,
       insertedCount: result.insertedCount,
       toolIds: result.insertedIds,
-    })
+    });
   } catch (error) {
-    console.error("Error bulk adding tools to shed:", error)
-    res.status(500).json({ success: false, error: error.message })
+    console.error('Error bulk adding tools to shed:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
-})
+});
 app.use((req, res) => {
   res.status(404).send({ error: 'Not Found' });
 });
-
 app.use((err, req, res, next) => {
   console.error('Global error handler:', err.stack);
   res.status(500).send({ error: 'Something went wrong!' });
