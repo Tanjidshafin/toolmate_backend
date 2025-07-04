@@ -7,6 +7,8 @@ const clerkClient = createClerkClient({
 });
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const OpenAI = require('openai');
+const EmailService = require('./services/emailService');
+const EmailTriggers = require('./services/emailTriggers');
 const app = express();
 const PORT = process.env.PORT || 5000;
 const { Server } = require('socket.io');
@@ -40,6 +42,9 @@ let redirectTrackingStorage;
 let ragSystemStorage;
 let chatLogsStorage;
 let shedToolsStorage;
+let emailLogsStorage;
+let emailService;
+let emailTriggers;
 async function run() {
   try {
     await client.connect();
@@ -55,6 +60,9 @@ async function run() {
     ragSystemStorage = client.db('Toolmate').collection('RagSystemStorage');
     chatLogsStorage = client.db('Toolmate').collection('ChatLogsStorage');
     shedToolsStorage = client.db('Toolmate').collection('ShedTools');
+    emailLogsStorage = client.db('Toolmate').collection('EmailLogs');
+    emailService = new EmailService(emailLogsStorage);
+    emailTriggers = new EmailTriggers(emailService);
     server.listen(PORT, () => {
       console.log(`🚀 Server is running on port ${PORT}`);
       console.log(`🔌 Socket.io server is ready`);
@@ -203,7 +211,7 @@ app.post('/add-feedback', async (req, res) => {
 });
 app.post('/store-messages', async (req, res) => {
   try {
-    const data = req.body; // { userEmail, userName, messages: [...] }
+    const data = req.body;
     const emailArray = Array.isArray(data.userEmail) ? data.userEmail : [data.userEmail];
     const existingUserMessages = await messagesStorage.findOne({
       userEmail: { $elemMatch: { $in: emailArray } },
@@ -309,6 +317,7 @@ app.post('/store-user', async (req, res) => {
         updatedAt: new Date(),
         clerkId,
       };
+      await emailTriggers.triggerWelcomeEmail(userData);
       const result = await usersStorage.insertOne(userData);
       res.json({ inserted: true, result });
     }
@@ -1536,6 +1545,177 @@ app.get('/admin/shed-analytics', async (req, res) => {
   } catch (error) {
     console.error('Error fetching shed analytics:', error);
     res.status(500).json({ success: false, error: error.message });
+  }
+});
+// Get email logs for admin
+app.get('/admin/email-logs', async (req, res) => {
+  try {
+    const { page = 1, limit = 50, type, success, recipient } = req.query;
+    const skip = (page - 1) * limit;
+
+    const query = {};
+    if (type) query.type = type;
+    if (success !== undefined) query.success = success === 'true';
+    if (recipient) query.recipient = { $regex: recipient, $options: 'i' };
+
+    const logs = await emailLogsStorage
+      .find(query)
+      .sort({ timestamp: -1 })
+      .skip(skip)
+      .limit(Number.parseInt(limit))
+      .toArray();
+
+    const total = await emailLogsStorage.countDocuments(query);
+
+    // Get email statistics
+    const stats = await emailLogsStorage
+      .aggregate([
+        {
+          $group: {
+            _id: {
+              type: '$type',
+              success: '$success',
+            },
+            count: { $sum: 1 },
+          },
+        },
+      ])
+      .toArray();
+
+    res.json({
+      logs,
+      stats: stats.reduce((acc, stat) => {
+        const key = `${stat._id.type}_${stat._id.success ? 'success' : 'failed'}`;
+        acc[key] = stat.count;
+        return acc;
+      }, {}),
+      pagination: {
+        current: Number.parseInt(page),
+        total: Math.ceil(total / limit),
+        count: total,
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching email logs:', error);
+    res.status(500).json({ error: 'Failed to fetch email logs' });
+  }
+});
+
+// Get email statistics
+app.get('/admin/email-stats', async (req, res) => {
+  try {
+    const { period = '7d' } = req.query;
+    const now = new Date();
+    const startDate = new Date();
+
+    switch (period) {
+      case '24h':
+        startDate.setHours(startDate.getHours() - 24);
+        break;
+      case '7d':
+        startDate.setDate(startDate.getDate() - 7);
+        break;
+      case '30d':
+        startDate.setDate(startDate.getDate() - 30);
+        break;
+      default:
+        startDate.setDate(startDate.getDate() - 7);
+    }
+
+    const totalEmails = await emailLogsStorage.countDocuments({
+      timestamp: { $gte: startDate },
+    });
+
+    const successfulEmails = await emailLogsStorage.countDocuments({
+      timestamp: { $gte: startDate },
+      success: true,
+    });
+
+    const failedEmails = await emailLogsStorage.countDocuments({
+      timestamp: { $gte: startDate },
+      success: false,
+    });
+
+    const emailsByType = await emailLogsStorage
+      .aggregate([
+        { $match: { timestamp: { $gte: startDate } } },
+        {
+          $group: {
+            _id: '$type',
+            count: { $sum: 1 },
+            successful: {
+              $sum: { $cond: ['$success', 1, 0] },
+            },
+          },
+        },
+      ])
+      .toArray();
+
+    res.json({
+      period,
+      dateRange: { start: startDate, end: now },
+      summary: {
+        totalEmails,
+        successfulEmails,
+        failedEmails,
+        successRate: totalEmails > 0 ? ((successfulEmails / totalEmails) * 100).toFixed(2) : 0,
+      },
+      emailsByType,
+    });
+  } catch (error) {
+    console.error('Error fetching email statistics:', error);
+    res.status(500).json({ error: 'Failed to fetch email statistics' });
+  }
+});
+
+// Resend failed email
+app.post('/admin/email-logs/:id/resend', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ error: 'Invalid email log ID format' });
+    }
+
+    const emailLog = await emailLogsStorage.findOne({ _id: new ObjectId(id) });
+
+    if (!emailLog) {
+      return res.status(404).json({ error: 'Email log not found' });
+    }
+
+    if (emailLog.success) {
+      return res.status(400).json({ error: 'Cannot resend successful email' });
+    }
+
+    // Resend based on email type
+    let result;
+    switch (emailLog.type) {
+      case 'welcome':
+        result = await emailService.sendWelcomeEmail(emailLog.recipient, emailLog.recipientName);
+        break;
+      case 'password_reset_success':
+        result = await emailService.sendPasswordResetSuccessEmail(emailLog.recipient, emailLog.recipientName);
+        break;
+      case 'system_alert':
+        result = await emailService.sendSystemAlertEmail(
+          emailLog.recipient,
+          emailLog.recipientName,
+          emailLog.subType,
+          emailLog.message
+        );
+        break;
+      default:
+        return res.status(400).json({ error: 'Unknown email type for resend' });
+    }
+
+    res.json({
+      message: 'Email resend attempted',
+      success: result.success,
+      originalLogId: id,
+    });
+  } catch (error) {
+    console.error('Error resending email:', error);
+    res.status(500).json({ error: 'Failed to resend email' });
   }
 });
 // Get shed statistics for admin dashboard
