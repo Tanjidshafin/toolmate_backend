@@ -563,9 +563,19 @@ app.put('/admin/users/:email/ban', async (req, res) => {
 });
 //custom email post
 app.post('/admin/post/email', async (req, res) => {
-  const { userName, userEmail, message, subject } = req.body;
-  await emailTriggers.triggerSystemAlert(userEmail, userName, subject, message);
+  try {
+    const { userName, userEmail, message, subject } = req.body;
+    if (!userName || !userEmail || !message || !subject) {
+      return res.status(400).json({ success: false, message: 'Missing required fields.' });
+    }
+    await emailTriggers.triggerSystemAlert(userEmail, userName, subject, message);
+    res.status(200).json({ success: true, message: 'Email sent successfully.' });
+  } catch (error) {
+    console.error('Error sending email:', error);
+    res.status(500).json({ success: false, message: 'Failed to send email.' });
+  }
 });
+
 app.get('/admin/flagged-messages', async (req, res) => {
   try {
     const { status, page = 1, limit = 20 } = req.query;
