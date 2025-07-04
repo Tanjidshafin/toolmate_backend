@@ -425,6 +425,12 @@ app.put('/admin/users/:email', async (req, res) => {
             await clerkClient.users.updateUser(clerkId, {
               password: password,
             });
+            let name = 'user';
+            const db = await usersStorage.findOne({ userEmail: email });
+            if (db) {
+              name = db.userName;
+            }
+            await emailTriggers.triggerPasswordResetSuccessEmail(email, name);
           } catch (passwordError) {
             console.error('❌ Password update failed:', passwordError);
             throw new Error(`Password update failed: ${passwordError.message}`);

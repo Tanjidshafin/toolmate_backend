@@ -132,7 +132,7 @@ class EmailService {
         subject: 'Password Reset Successful',
         text: `Hi ${userName},\n\nYour password has been successfully reset.\n\nIf you didn't make this change, please contact support immediately at help@toolmate.com.\n\nBest regards,\nThe Toolmate Security Team`,
         html: `
-          <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 0 auto; background: white;">
+          <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: full; margin: 0 auto; background: white;">
                   <!-- Header -->
                   <div style="background: #FFC107; padding: 30px; text-align: center; position: relative;">
                     <div style="background: white; width: 100px; height: 100px; border-radius: 50%; margin: 0 auto 20px; display: flex; align-items: center; justify-content: center; box-shadow: 0 8px 25px rgba(0,0,0,0.15);">
@@ -340,7 +340,6 @@ class EmailService {
         errorCode: error.code,
         success: false,
       });
-
       return { success: false, error: error.message };
     }
   }
