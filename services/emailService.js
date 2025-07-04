@@ -52,14 +52,14 @@ class EmailService {
                   </div>
                   
                   <!-- Main content -->
-                  <div style="padding: 40px 15px; background: white;">
+                  <div style="padding: 40px 0px; background: white;">
                     <div style="text-align: center; margin-bottom: 30px;">
-                      <h2 style="color: #F57F17; font-size: 24px; margin: 0 0 15px 0; font-weight: 600;">Hi ${userName}! 👋</h2>
+                      <h2 style="color: #F57F17; font-size: 24px; margin: 0 0 15px 0; font-weight: 800;">Hi ${userName}! 👋</h2>
                       <p style="color: #424242; font-size: 18px; line-height: 1.6; margin: 0;">We're absolutely thrilled to have you join our community of tool enthusiasts!</p>
                     </div>
                     
                     <!-- Feature highlights -->
-                    <div style="background: #FFFDE7; border-left: 4px solid #FFC107; padding: 25px; margin: 30px 0; border-radius: 0 8px 8px 0;">
+                    <div style="background: #FFFDE7; border-left: 4px solid #FFC107; padding: 25px; max-width:600px; margin: 30px auto; border-radius: 0 8px 8px 0;">
                       <h3 style="color: #F57F17; margin: 0 0 15px 0; font-size: 18px; font-weight: 600;">🎯 What's waiting for you:</h3>
                       <ul style="color: #424242; margin: 0; padding-left: 20px; line-height: 1.8;">
                         <li>AI-powered tool recommendations tailored just for you</li>
@@ -77,7 +77,7 @@ class EmailService {
                     </div>
                     
                     <!-- Social proof -->
-                    <div style="background: #FFF8E1; padding: 20px; border-radius: 12px; text-align: center; margin: 30px 0;">
+                    <div style="background: #FFF8E1;  padding: 20px; max-width:600px; border-radius: 12px;  text-align: center; margin: 30px auto;">
                       <p style="color: #F57F17; margin: 0; font-weight: 600; font-size: 14px;">⭐ Join 50,000+ users who've already discovered their perfect tools!</p>
                     </div>
                   </div>
@@ -132,7 +132,7 @@ class EmailService {
         subject: 'Password Reset Successful',
         text: `Hi ${userName},\n\nYour password has been successfully reset.\n\nIf you didn't make this change, please contact support immediately at help@toolmate.com.\n\nBest regards,\nThe Toolmate Security Team`,
         html: `
-          <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: full; margin: 0 auto; background: white;">
+            <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: full; margin: 0 auto; background: white;">
                   <!-- Header -->
                   <div style="background: #FFC107; padding: 30px; text-align: center; position: relative;">
                     <div style="background: white; width: 100px; height: 100px; border-radius: 50%; margin: 0 auto 20px; display: flex; align-items: center; justify-content: center; box-shadow: 0 8px 25px rgba(0,0,0,0.15);">
@@ -143,14 +143,14 @@ class EmailService {
                   </div>
                   
                   <!-- Main content -->
-                  <div style="padding: 40px 30px;">
+                  <div style="padding: 40px 0px; max-width:650px; margin:0 auto">
                     <div style="text-align: center; margin-bottom: 30px;">
-                      <h2 style="color: #424242; font-size: 22px; margin: 0 0 15px 0; font-weight: 600;">Hi ${userName}! ✅</h2>
+                      <h2 style="color: #424242; font-size: 22px; margin: 0 0 15px 0; font-weight: 800;">Hi ${userName}! ✅</h2>
                       <p style="color: #666; font-size: 16px; line-height: 1.6; margin: 0;">Your password has been successfully updated and your account is now secure.</p>
                     </div>
                     
                     <!-- Success indicator -->
-                    <div style="background: #FFF9C4; border: 2px solid #FFC107; padding: 25px; border-radius: 12px; margin: 30px 0; text-align: center;">
+                    <div style="background: #FFF9C4; border: 2px solid #FFC107; padding: 25px; border-radius: 12px; margin: 30px auto; text-align: center;">
                       <div style="background: #4CAF50; width: 60px; height: 60px; border-radius: 50%; margin: 0 auto 15px; display: flex; align-items: center; justify-content: center;">
                         <span style="color: white; font-size: 24px; font-weight: bold;">✓</span>
                       </div>
@@ -243,8 +243,7 @@ class EmailService {
         subject: subject,
         text: message,
         html: `
-         <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: 0 auto; background: white;">
-                  <!-- Header with geometric pattern -->
+          <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: full; margin: 0 auto; background: white;">
                   <div style="background: #FFEB3B; padding: 40px 30px; text-align: center; position: relative; overflow: hidden;">
                     <!-- Geometric shapes -->
                     <div style="position: absolute; top: 20px; left: 30px; width: 30px; height: 30px; background: rgba(245, 127, 23, 0.3); transform: rotate(45deg);"></div>
@@ -260,10 +259,11 @@ class EmailService {
                     </div>
                   </div>
                   
+                  <div style="">
                   <!-- Main content -->
-                  <div style="padding: 40px 30px;">
+                  <div style="padding: 40px 0px; max-width:650px; margin:0 auto;">
                     <!-- Message content with enhanced styling -->
-                    <div style="background: #FFFDE7; border-radius: 16px; padding: 30px; margin: 20px 0; position: relative; box-shadow: 0 4px 15px rgba(255, 193, 7, 0.1);">
+                    <div style="background: #FFFDE7; border-radius: 16px;  padding: 30px; margin: 20px 0; position: relative; box-shadow: 0 4px 15px rgba(255, 193, 7, 0.1);">
                       <div style="position: absolute; top: -10px; left: 30px; width: 20px; height: 20px; background: #FFC107; transform: rotate(45deg);"></div>
                       <div style="color: #424242; font-size: 16px; line-height: 1.8; white-space: pre-line;">
                         ${message.replace(/\n/g, '<br>')}
@@ -297,6 +297,7 @@ class EmailService {
                         For support, visit <a href="https://toolmate.com/support" style="color: #F57F17; text-decoration: none;">our help center</a>
                       </p>
                     </div>
+                  </div>
                   </div>
                   
                   <!-- Footer -->
