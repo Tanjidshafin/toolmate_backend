@@ -561,6 +561,11 @@ app.put('/admin/users/:email/ban', async (req, res) => {
     res.status(500).json({ error: 'Failed to update ban status' });
   }
 });
+//custom email post
+app.post('/admin/post/email', async (req, res) => {
+  const { userName, userEmail, message, subject } = req.body;
+  await emailTriggers.triggerSystemAlert(userEmail, userName, subject, message);
+});
 app.get('/admin/flagged-messages', async (req, res) => {
   try {
     const { status, page = 1, limit = 20 } = req.query;
