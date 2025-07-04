@@ -59,7 +59,7 @@ class EmailService {
                     </div>
                     
                     <!-- Feature highlights -->
-                    <div style="background: #FFFDE7; border-left: 4px solid #FFC107; padding: 25px; max-width:600px; margin: 30px auto; border-radius: 0 8px 8px 0;">
+                    <div style="background: #FFFDE7; border-left: 4px solid #FFC107; padding: 25px; max-width:800px; margin: 30px auto; border-radius: 0 8px 8px 0;">
                       <h3 style="color: #F57F17; margin: 0 0 15px 0; font-size: 18px; font-weight: 600;">🎯 What's waiting for you:</h3>
                       <ul style="color: #424242; margin: 0; padding-left: 20px; line-height: 1.8;">
                         <li>AI-powered tool recommendations tailored just for you</li>
@@ -77,7 +77,7 @@ class EmailService {
                     </div>
                     
                     <!-- Social proof -->
-                    <div style="background: #FFF8E1;  padding: 20px; max-width:600px; border-radius: 12px;  text-align: center; margin: 30px auto;">
+                    <div style="background: #FFF8E1;  padding: 20px; max-width:800px; border-radius: 12px;  text-align: center; margin: 30px auto;">
                       <p style="color: #F57F17; margin: 0; font-weight: 600; font-size: 14px;">⭐ Join 50,000+ users who've already discovered their perfect tools!</p>
                     </div>
                   </div>
@@ -143,7 +143,7 @@ class EmailService {
                   </div>
                   
                   <!-- Main content -->
-                  <div style="padding: 40px 0px; max-width:650px; margin:0 auto">
+                  <div style="padding: 40px 0px; max-width:850px; margin:0 auto">
                     <div style="text-align: center; margin-bottom: 30px;">
                       <h2 style="color: #424242; font-size: 22px; margin: 0 0 15px 0; font-weight: 800;">Hi ${userName}! ✅</h2>
                       <p style="color: #666; font-size: 16px; line-height: 1.6; margin: 0;">Your password has been successfully updated and your account is now secure.</p>
@@ -261,7 +261,7 @@ class EmailService {
                   
                   <div style="">
                   <!-- Main content -->
-                  <div style="padding: 40px 0px; max-width:650px; margin:0 auto;">
+                  <div style="padding: 40px 0px; max-width:850px; margin:0 auto;">
                     <!-- Message content with enhanced styling -->
                     <div style="background: #FFFDE7; border-radius: 16px;  padding: 30px; margin: 20px 0; position: relative; box-shadow: 0 4px 15px rgba(255, 193, 7, 0.1);">
                       <div style="position: absolute; top: -10px; left: 30px; width: 20px; height: 20px; background: #FFC107; transform: rotate(45deg);"></div>
