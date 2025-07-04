@@ -305,16 +305,6 @@ app.post('/store-user', async (req, res) => {
           },
         }
       );
-      await emailTriggers.triggerWelcomeEmail({
-        userEmail,
-        userName,
-        userImage,
-        isSubscribed: isSubscribed || false,
-        role: role || 'user',
-        createdAt: new Date(),
-        updatedAt: new Date(),
-        clerkId,
-      });
       res.json({ updated: true, result });
     } else {
       const userData = {
@@ -329,6 +319,16 @@ app.post('/store-user', async (req, res) => {
       };
       const result = await usersStorage.insertOne(userData);
       res.json({ inserted: true, result });
+      await emailTriggers.triggerWelcomeEmail({
+        userEmail,
+        userName,
+        userImage,
+        isSubscribed: isSubscribed || false,
+        role: role || 'user',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        clerkId,
+      });
     }
   } catch (error) {
     console.error('Error storing user:', error);
