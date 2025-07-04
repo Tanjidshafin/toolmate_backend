@@ -442,6 +442,14 @@ app.put('/admin/users/:email', async (req, res) => {
             await clerkClient.users.updateUser(clerkId, {
               banned: isBanned,
             });
+            let name = 'user';
+            let alertType = '';
+            const db = await usersStorage.findOne({ userEmail: email });
+            if (db) {
+              name = db.userName;
+              alertType = !db?.isBanned ? 'account_banned' : 'account_unbanned';
+            }
+            await emailTriggers.triggerSystemAlert(email, name, alertType);
           } catch (banError) {
             throw new Error(`Ban status update failed: ${banError.message}`);
           }
