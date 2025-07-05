@@ -561,6 +561,20 @@ app.put('/admin/users/:email/ban', async (req, res) => {
     res.status(500).json({ error: 'Failed to update ban status' });
   }
 });
+app.delete('/admin/users/:email', async (req, res) => {
+  try {
+    const userEmail = req.params.email;
+    const result = await usersStorage.deleteOne({ userEmail });
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    res.json({ message: 'User deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting user:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
 //custom email post
 app.post('/admin/post/email', async (req, res) => {
   try {
