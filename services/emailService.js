@@ -238,7 +238,7 @@ class EmailService {
         to: userEmail,
         from: {
           email: FROM_EMAIL,
-          name: `${FROM_NAME} System`,
+          name: `Matey from ${FROM_NAME}`,
         },
         subject: subject,
         text: message,
