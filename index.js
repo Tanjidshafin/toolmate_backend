@@ -9,6 +9,7 @@ const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const OpenAI = require('openai');
 const EmailService = require('./services/emailService');
 const EmailTriggers = require('./services/emailTriggers');
+const AuditLogger = require('./services/auditLogs');
 const app = express();
 const PORT = process.env.PORT || 5000;
 const { Server } = require('socket.io');
@@ -43,8 +44,11 @@ let ragSystemStorage;
 let chatLogsStorage;
 let shedToolsStorage;
 let emailLogsStorage;
+let auditLogsStorage; // Add audit logs storage
 let emailService;
 let emailTriggers;
+let auditLogger; // Add audit logger instance
+
 async function run() {
   try {
     await client.connect();
@@ -61,8 +65,10 @@ async function run() {
     chatLogsStorage = client.db('Toolmate').collection('ChatLogsStorage');
     shedToolsStorage = client.db('Toolmate').collection('ShedTools');
     emailLogsStorage = client.db('Toolmate').collection('EmailLogs');
+    auditLogsStorage = client.db('Toolmate').collection('AuditLogs'); // Initialize audit logs collection
     emailService = new EmailService(emailLogsStorage);
     emailTriggers = new EmailTriggers(emailService);
+    auditLogger = new AuditLogger(auditLogsStorage); // Initialize audit logger
     server.listen(PORT, () => {
       console.log(`🚀 Server is running on port ${PORT}`);
       console.log(`🔌 Socket.io server is ready`);
@@ -74,6 +80,15 @@ async function run() {
 }
 
 run();
+
+// Helper function to get user info from request
+function getUserInfoFromRequest(req) {
+  return {
+    ipAddress: req.ip || req.connection.remoteAddress,
+    userAgent: req.headers['user-agent'],
+  };
+}
+
 io.on('connection', (socket) => {
   console.log('✅ Admin connected for real-time monitoring:', socket.id);
   socket.on('join-monitoring', (data) => {
@@ -103,6 +118,26 @@ io.on('connection', (socket) => {
           };
         }
       }
+
+      // Log audit for message injection
+      await auditLogger.logAudit({
+        action: 'INJECT_MESSAGE',
+        resource: 'session',
+        resourceId: data.sessionId,
+        userId: 'admin',
+        userEmail: 'admin@toolmate.com',
+        role: 'admin',
+        newData: {
+          message: data.message,
+          targetSession: data.sessionId,
+          targetUser: userDetails?.userEmail || 'Unknown',
+        },
+        metadata: {
+          socketId: socket.id,
+          targetUserName: userDetails?.userName || 'Unknown User',
+        },
+      });
+
       io.to('admin-monitoring').emit('injected-message-confirmation', {
         sessionId: data.sessionId,
         message: data.message,
@@ -135,6 +170,7 @@ io.on('connection', (socket) => {
     console.log('❌ Admin disconnected from monitoring:', socket.id, 'Reason:', reason);
   });
 });
+
 async function emitNewLiveMessage(messageData) {
   try {
     let userDetails = null;
@@ -168,9 +204,11 @@ function notifyActiveSessionsChanged() {
 app.get('/', (req, res) => {
   res.send('Welcome to Toolmate');
 });
+
 app.post('/add-feedback', async (req, res) => {
   try {
     const data = req.body;
+    const userInfo = getUserInfoFromRequest(req);
     let existingFeedback = null;
     if (Array.isArray(data.email) && data.email.length > 0) {
       const query = {
@@ -184,8 +222,25 @@ app.post('/add-feedback', async (req, res) => {
       res.send({ message: 'Report is already added!' });
     } else {
       const result = await feedbackStorage.insertOne(data);
+
+      // Log audit for feedback creation
+      await auditLogger.logAudit({
+        action: 'CREATE',
+        resource: 'feedback',
+        resourceId: result.insertedId.toString(),
+        userId: data.email?.[0] || data.email,
+        userEmail: data.email?.[0] || data.email,
+        role: data.isLoggedInUser ? 'user' : 'anonymous',
+        newData: {
+          messageId: data.messageId,
+          reportStatus: data.reportStatus,
+          feedback: data.feedback,
+        },
+        ...userInfo,
+      });
+
       if (data.reportStatus && data.feedback && data.feedback.reasons) {
-        await flaggedMessagesStorage.insertOne({
+        const flaggedResult = await flaggedMessagesStorage.insertOne({
           messageId: data.messageId,
           messageText: data.messageText,
           messageTimestamp: data.messageTimestamp,
@@ -201,6 +256,22 @@ app.post('/add-feedback', async (req, res) => {
           softDeleted: false,
           archived: false,
         });
+
+        // Log audit for flagged message creation
+        await auditLogger.logAudit({
+          action: 'CREATE',
+          resource: 'flagged_message',
+          resourceId: flaggedResult.insertedId.toString(),
+          userId: data.email?.[0] || data.email,
+          userEmail: data.email?.[0] || data.email,
+          role: data.isLoggedInUser ? 'user' : 'anonymous',
+          newData: {
+            messageId: data.messageId,
+            reasons: data.feedback.reasons,
+            status: 'pending',
+          },
+          ...userInfo,
+        });
       }
       res.status(200).send(result);
     }
@@ -209,9 +280,11 @@ app.post('/add-feedback', async (req, res) => {
     res.status(500).send({ error: 'Failed to store feedback' });
   }
 });
+
 app.post('/store-messages', async (req, res) => {
   try {
     const data = req.body;
+    const userInfo = getUserInfoFromRequest(req);
     const emailArray = Array.isArray(data.userEmail) ? data.userEmail : [data.userEmail];
     const existingUserMessages = await messagesStorage.findOne({
       userEmail: { $elemMatch: { $in: emailArray } },
@@ -220,13 +293,41 @@ app.post('/store-messages', async (req, res) => {
 
     let result;
     if (existingUserMessages) {
+      const oldData = { messages: existingUserMessages.messages };
       result = await messagesStorage.updateOne(
         { _id: existingUserMessages._id },
         { $set: { messages: data.messages } }
       );
+
+      // Log audit for message update
+      await auditLogger.logAudit({
+        action: 'UPDATE',
+        resource: 'messages',
+        resourceId: existingUserMessages._id.toString(),
+        userId: data.userEmail?.[0] || data.userEmail,
+        userEmail: data.userEmail?.[0] || data.userEmail,
+        role: 'user',
+        oldData,
+        newData: { messages: data.messages },
+        ...userInfo,
+      });
+
       res.send({ updated: true, result });
     } else {
       result = await messagesStorage.insertOne(data);
+
+      // Log audit for message creation
+      await auditLogger.logAudit({
+        action: 'CREATE',
+        resource: 'messages',
+        resourceId: result.insertedId.toString(),
+        userId: data.userEmail?.[0] || data.userEmail,
+        userEmail: data.userEmail?.[0] || data.userEmail,
+        role: 'user',
+        newData: data,
+        ...userInfo,
+      });
+
       res.send({ inserted: true, result });
     }
   } catch (error) {
@@ -250,12 +351,14 @@ app.get('/messages/:email', async (req, res) => {
 app.post('/store-suggested-tools', async (req, res) => {
   try {
     const data = req.body;
+    const userInfo = getUserInfoFromRequest(req);
     const emailArray = data.userEmail;
     const existingUser = await toolsStorage.findOne({
       userEmail: { $elemMatch: { $in: emailArray } },
       userName: data.userName,
     });
     if (existingUser) {
+      const oldData = { suggestedTools: existingUser.suggestedTools };
       const result = await toolsStorage.updateOne(
         { _id: existingUser._id },
         {
@@ -264,9 +367,36 @@ app.post('/store-suggested-tools', async (req, res) => {
           },
         }
       );
+
+      // Log audit for tools update
+      await auditLogger.logAudit({
+        action: 'UPDATE',
+        resource: 'suggested_tools',
+        resourceId: existingUser._id.toString(),
+        userId: data.userEmail?.[0] || data.userEmail,
+        userEmail: data.userEmail?.[0] || data.userEmail,
+        role: 'user',
+        oldData,
+        newData: { suggestedTools: data.suggestedTools },
+        ...userInfo,
+      });
+
       res.send({ updated: true, result });
     } else {
       const result = await toolsStorage.insertOne(data);
+
+      // Log audit for tools creation
+      await auditLogger.logAudit({
+        action: 'CREATE',
+        resource: 'suggested_tools',
+        resourceId: result.insertedId.toString(),
+        userId: data.userEmail?.[0] || data.userEmail,
+        userEmail: data.userEmail?.[0] || data.userEmail,
+        role: 'user',
+        newData: data,
+        ...userInfo,
+      });
+
       res.send({ inserted: true, result });
     }
   } catch (error) {
@@ -290,21 +420,33 @@ app.get('/tools/:email', async (req, res) => {
 app.post('/store-user', async (req, res) => {
   try {
     const { userEmail, userName, userImage, isSubscribed, role, clerkId } = req.body;
+    const userInfo = getUserInfoFromRequest(req);
     const existingUser = await usersStorage.findOne({ userEmail });
     if (existingUser) {
-      const result = await usersStorage.updateOne(
-        { userEmail },
-        {
-          $set: {
-            clerkId,
-            userName,
-            userImage,
-            isSubscribed,
-            role,
-            updatedAt: new Date(),
-          },
-        }
-      );
+      const oldData = { ...existingUser };
+      const updateData = {
+        clerkId,
+        userName,
+        userImage,
+        isSubscribed,
+        role,
+        updatedAt: new Date(),
+      };
+      const result = await usersStorage.updateOne({ userEmail }, { $set: updateData });
+
+      // Log audit for user update
+      await auditLogger.logAudit({
+        action: 'UPDATE',
+        resource: 'user',
+        resourceId: existingUser._id.toString(),
+        userId: userEmail,
+        userEmail,
+        role: role || existingUser.role || 'user',
+        oldData,
+        newData: updateData,
+        ...userInfo,
+      });
+
       res.json({ updated: true, result });
     } else {
       const userData = {
@@ -319,6 +461,19 @@ app.post('/store-user', async (req, res) => {
       };
       await emailTriggers.triggerWelcomeEmail(userData);
       const result = await usersStorage.insertOne(userData);
+
+      // Log audit for user creation
+      await auditLogger.logAudit({
+        action: 'CREATE',
+        resource: 'user',
+        resourceId: result.insertedId.toString(),
+        userId: userEmail,
+        userEmail,
+        role: role || 'user',
+        newData: userData,
+        ...userInfo,
+      });
+
       res.json({ inserted: true, result });
     }
   } catch (error) {
@@ -373,10 +528,19 @@ app.get('/admin/users', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch users' });
   }
 });
+
 app.put('/admin/users/:email', async (req, res) => {
   try {
     const { email } = req.params;
     const { role, isSubscribed, userEmail, userName, password, isBanned, clerkId } = req.body;
+    const userInfo = getUserInfoFromRequest(req);
+
+    // Get existing user data for audit logging
+    const existingUser = await usersStorage.findOne({ userEmail: email });
+    if (!existingUser) {
+      return res.status(404).json({ error: 'User not found in database' });
+    }
+
     const updateData = {
       updatedAt: new Date(),
     };
@@ -470,6 +634,25 @@ app.put('/admin/users/:email', async (req, res) => {
     if (result.matchedCount === 0) {
       return res.status(404).json({ error: 'User not found in database' });
     }
+
+    // Log audit for user update by admin
+    await auditLogger.logAudit({
+      action: 'UPDATE',
+      resource: 'user',
+      resourceId: existingUser._id.toString(),
+      userId: 'admin', // Admin performing the action
+      userEmail: 'admin@toolmate.com',
+      role: 'admin',
+      oldData: existingUser,
+      newData: updateData,
+      metadata: {
+        targetUser: email,
+        updatedFields: Object.keys(updateData),
+        adminAction: true,
+      },
+      ...userInfo,
+    });
+
     res.json({
       message: 'User updated successfully',
       updatedFields: Object.keys(updateData),
@@ -479,10 +662,13 @@ app.put('/admin/users/:email', async (req, res) => {
     res.status(500).json({ error: 'Failed to update user' });
   }
 });
+
 app.put('/admin/users/:email/password', async (req, res) => {
   try {
     const { email } = req.params;
     const { password, clerkId } = req.body;
+    const userInfo = getUserInfoFromRequest(req);
+
     if (!clerkId) {
       return res.status(400).json({ error: 'Clerk ID is required for password updates' });
     }
@@ -503,6 +689,26 @@ app.put('/admin/users/:email/password', async (req, res) => {
           },
         }
       );
+
+      // Log audit for password update by admin
+      await auditLogger.logAudit({
+        action: 'UPDATE_PASSWORD',
+        resource: 'user',
+        resourceId: email,
+        userId: 'admin',
+        userEmail: 'admin@toolmate.com',
+        role: 'admin',
+        newData: {
+          passwordUpdatedAt: new Date(),
+          updatedAt: new Date(),
+        },
+        metadata: {
+          targetUser: email,
+          adminAction: true,
+        },
+        ...userInfo,
+      });
+
       res.json({ message: 'Password updated successfully' });
     } catch (clerkError) {
       console.error('❌ Clerk password update error:', clerkError);
@@ -516,10 +722,13 @@ app.put('/admin/users/:email/password', async (req, res) => {
     res.status(500).json({ error: 'Failed to update password' });
   }
 });
+
 app.put('/admin/users/:email/ban', async (req, res) => {
   try {
     const { email } = req.params;
     const { banned, clerkId } = req.body;
+    const userInfo = getUserInfoFromRequest(req);
+
     if (!clerkId) {
       return res.status(400).json({ error: 'Clerk ID is required for ban operations' });
     }
@@ -545,6 +754,26 @@ app.put('/admin/users/:email/ban', async (req, res) => {
       if (result.matchedCount === 0) {
         return res.status(404).json({ error: 'User not found in database' });
       }
+
+      // Log audit for ban/unban action
+      await auditLogger.logAudit({
+        action: banned ? 'BAN_USER' : 'UNBAN_USER',
+        resource: 'user',
+        resourceId: email,
+        userId: 'admin',
+        userEmail: 'admin@toolmate.com',
+        role: 'admin',
+        newData: {
+          isBanned: banned,
+          bannedAt: banned ? new Date() : null,
+        },
+        metadata: {
+          targetUser: email,
+          adminAction: true,
+        },
+        ...userInfo,
+      });
+
       res.json({
         message: `User ${banned ? 'banned' : 'unbanned'} successfully`,
         banned: banned,
@@ -561,13 +790,39 @@ app.put('/admin/users/:email/ban', async (req, res) => {
     res.status(500).json({ error: 'Failed to update ban status' });
   }
 });
+
 app.delete('/admin/users/:email', async (req, res) => {
   try {
     const userEmail = req.params.email;
+    const userInfo = getUserInfoFromRequest(req);
+
+    // Get user data before deletion for audit log
+    const existingUser = await usersStorage.findOne({ userEmail });
+    if (!existingUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
     const result = await usersStorage.deleteOne({ userEmail });
     if (result.deletedCount === 0) {
       return res.status(404).json({ message: 'User not found' });
     }
+
+    // Log audit for user deletion
+    await auditLogger.logAudit({
+      action: 'DELETE',
+      resource: 'user',
+      resourceId: existingUser._id.toString(),
+      userId: 'admin',
+      userEmail: 'admin@toolmate.com',
+      role: 'admin',
+      oldData: existingUser,
+      metadata: {
+        deletedUser: userEmail,
+        adminAction: true,
+      },
+      ...userInfo,
+    });
+
     res.json({ message: 'User deleted successfully' });
   } catch (error) {
     console.error('Error deleting user:', error);
@@ -579,10 +834,34 @@ app.delete('/admin/users/:email', async (req, res) => {
 app.post('/admin/post/email', async (req, res) => {
   try {
     const { userName, userEmail, message, subject } = req.body;
+    const userInfo = getUserInfoFromRequest(req);
+
     if (!userName || !userEmail || !message || !subject) {
       return res.status(400).json({ success: false, message: 'Missing required fields.' });
     }
     await emailTriggers.triggerSystemAlert(userEmail, userName, subject, message);
+
+    // Log audit for custom email sent
+    await auditLogger.logAudit({
+      action: 'SEND_EMAIL',
+      resource: 'email',
+      resourceId: userEmail,
+      userId: 'admin',
+      userEmail: 'admin@toolmate.com',
+      role: 'admin',
+      newData: {
+        recipient: userEmail,
+        recipientName: userName,
+        subject,
+        message,
+      },
+      metadata: {
+        emailType: 'custom_admin_email',
+        adminAction: true,
+      },
+      ...userInfo,
+    });
+
     res.status(200).json({ success: true, message: 'Email sent successfully.' });
   } catch (error) {
     console.error('Error sending email:', error);
@@ -620,13 +899,35 @@ app.get('/admin/flagged-messages', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch flagged messages' });
   }
 });
+
 // Add cleanup job for expired messages (run this periodically)
 app.post('/admin/cleanup-expired-messages', async (req, res) => {
   try {
+    const userInfo = getUserInfoFromRequest(req);
     const now = new Date();
     const result = await flaggedMessagesStorage.deleteMany({
       expiresAt: { $lt: now },
     });
+
+    // Log audit for cleanup action
+    await auditLogger.logAudit({
+      action: 'CLEANUP',
+      resource: 'flagged_messages',
+      resourceId: null,
+      userId: 'admin',
+      userEmail: 'admin@toolmate.com',
+      role: 'admin',
+      newData: {
+        deletedCount: result.deletedCount,
+        cleanupDate: now,
+      },
+      metadata: {
+        adminAction: true,
+        automatedCleanup: true,
+      },
+      ...userInfo,
+    });
+
     res.json({
       message: `Cleaned up ${result.deletedCount} expired messages`,
       deletedCount: result.deletedCount,
@@ -636,10 +937,13 @@ app.post('/admin/cleanup-expired-messages', async (req, res) => {
     res.status(500).json({ error: 'Failed to cleanup expired messages' });
   }
 });
+
 app.put('/admin/flagged-messages/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { status, adminComments, reviewedBy } = req.body;
+    const userInfo = getUserInfoFromRequest(req);
+
     if (!ObjectId.isValid(id)) {
       return res.status(400).json({ error: 'Invalid message ID format' });
     }
@@ -688,12 +992,31 @@ app.put('/admin/flagged-messages/:id', async (req, res) => {
     if (result.matchedCount === 0) {
       return res.status(404).json({ error: 'Flagged message not found' });
     }
+
+    // Log audit for flagged message status update
+    await auditLogger.logAudit({
+      action: 'UPDATE',
+      resource: 'flagged_message',
+      resourceId: id,
+      userId: reviewedBy || 'admin',
+      userEmail: 'admin@toolmate.com',
+      role: 'admin',
+      oldData: currentMessage,
+      newData: updateData,
+      metadata: {
+        statusTransition: `${currentMessage.status} -> ${status}`,
+        adminAction: true,
+      },
+      ...userInfo,
+    });
+
     res.json({ message: 'Flagged message updated successfully' });
   } catch (error) {
     console.error('Error updating flagged message:', error);
     res.status(500).json({ error: 'Failed to update flagged message' });
   }
 });
+
 app.get('/admin/flagged-messages/:id/context', async (req, res) => {
   try {
     const { id } = req.params;
@@ -744,23 +1067,50 @@ app.get('/admin/flagged-messages/:id/context', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch session context' });
   }
 });
+
 // DELETE flagged messages
 app.delete('/admin/flagged-messages/:id', async (req, res) => {
   try {
     const { id } = req.params;
+    const userInfo = getUserInfoFromRequest(req);
+
     if (!ObjectId.isValid(id)) {
       return res.status(400).json({ error: 'Invalid message ID format' });
     }
+
+    // Get the message before deletion for audit log
+    const flaggedMessage = await flaggedMessagesStorage.findOne({ _id: new ObjectId(id) });
+    if (!flaggedMessage) {
+      return res.status(404).json({ error: 'Flagged message not found' });
+    }
+
     const result = await flaggedMessagesStorage.deleteOne({ _id: new ObjectId(id) });
     if (result.deletedCount === 0) {
       return res.status(404).json({ error: 'Flagged message not found' });
     }
+
+    // Log audit for flagged message deletion
+    await auditLogger.logAudit({
+      action: 'DELETE',
+      resource: 'flagged_message',
+      resourceId: id,
+      userId: 'admin',
+      userEmail: 'admin@toolmate.com',
+      role: 'admin',
+      oldData: flaggedMessage,
+      metadata: {
+        adminAction: true,
+      },
+      ...userInfo,
+    });
+
     res.json({ message: 'Flagged message deleted successfully' });
   } catch (error) {
     console.error('Error deleting flagged message:', error);
     res.status(500).json({ error: 'Failed to delete flagged message' });
   }
 });
+
 app.post('/store-session', async (req, res) => {
   try {
     const {
@@ -775,6 +1125,7 @@ app.post('/store-session', async (req, res) => {
       messages = [],
     } = req.body;
 
+    const userInfo = getUserInfoFromRequest(req);
     const timestamp = new Date();
 
     const sessionData = {
@@ -819,6 +1170,25 @@ app.post('/store-session', async (req, res) => {
       sessionsStorage.insertOne(sessionData),
       chatLogsStorage.insertOne(logData),
     ]);
+
+    // Log audit for session creation
+    await auditLogger.logAudit({
+      action: 'CREATE',
+      resource: 'session',
+      resourceId: sessionInsert.insertedId.toString(),
+      userId: userEmail?.[0] || userEmail,
+      userEmail: userEmail?.[0] || userEmail,
+      role: 'user',
+      newData: {
+        sessionId,
+        userName,
+        prompt,
+        budgetTier,
+        flagTriggered,
+      },
+      ...userInfo,
+    });
+
     notifyActiveSessionsChanged();
     res.json({
       success: true,
@@ -880,6 +1250,7 @@ app.get('/admin/chat-logs', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch chat logs' });
   }
 });
+
 app.get('/admin/sessions', async (req, res) => {
   try {
     const { page = 1, limit = 20, search } = req.query;
@@ -920,6 +1291,7 @@ app.get('/admin/sessions', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch sessions' });
   }
 });
+
 app.get('/admin/sessions/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -942,6 +1314,7 @@ app.get('/admin/sessions/:id', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch session' });
   }
 });
+
 app.get('/admin/active-sessions', async (req, res) => {
   try {
     const fiveMinutesAgo = new Date();
@@ -1004,6 +1377,7 @@ app.get('/admin/active-sessions', async (req, res) => {
 
 app.post('/track-redirect', async (req, res) => {
   try {
+    const userInfo = getUserInfoFromRequest(req);
     const trackingData = {
       toolId: req.body.toolId,
       toolName: req.body.toolName,
@@ -1017,12 +1391,26 @@ app.post('/track-redirect', async (req, res) => {
       ip: req.ip,
     };
     await redirectTrackingStorage.insertOne(trackingData);
+
+    // Log audit for redirect tracking
+    await auditLogger.logAudit({
+      action: 'TRACK_REDIRECT',
+      resource: 'tool_redirect',
+      resourceId: req.body.toolId,
+      userId: req.body.userEmail,
+      userEmail: req.body.userEmail,
+      role: 'user',
+      newData: trackingData,
+      ...userInfo,
+    });
+
     res.json({ success: true });
   } catch (error) {
     console.error('Error tracking redirect:', error);
     res.status(500).json({ error: 'Failed to track redirect' });
   }
 });
+
 app.get('/admin/redirect-tracking', async (req, res) => {
   try {
     const { page = 1, limit = 50, toolId, dateFrom, dateTo } = req.query;
@@ -1068,6 +1456,7 @@ app.get('/admin/redirect-tracking', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch redirect tracking' });
   }
 });
+
 app.get('/admin/analytics', async (req, res) => {
   try {
     const { period = '7d' } = req.query;
@@ -1138,6 +1527,7 @@ app.get('/admin/analytics', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch analytics' });
   }
 });
+
 app.get('/admin/rag-system', async (req, res) => {
   try {
     const ragSettings = await ragSystemStorage.find({}).toArray();
@@ -1147,25 +1537,56 @@ app.get('/admin/rag-system', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch RAG settings' });
   }
 });
+
 app.put('/admin/rag-system/tool/:id/visibility', async (req, res) => {
   try {
     const { id } = req.params;
     const { hidden, updatedBy } = req.body;
+    const userInfo = getUserInfoFromRequest(req);
+
+    // Get existing data for audit log
+    const existingTool = await ragSystemStorage.findOne({ id });
+
     await ragSystemStorage.updateOne(
       { id },
       { $set: { id, hidden, updatedAt: new Date(), updatedBy: updatedBy || 'admin' } },
       { upsert: true }
     );
+
+    // Log audit for RAG tool visibility update
+    await auditLogger.logAudit({
+      action: 'UPDATE',
+      resource: 'rag_tool_visibility',
+      resourceId: id,
+      userId: updatedBy || 'admin',
+      userEmail: 'admin@toolmate.com',
+      role: 'admin',
+      oldData: existingTool,
+      newData: { hidden, updatedAt: new Date(), updatedBy: updatedBy || 'admin' },
+      metadata: {
+        toolId: id,
+        visibilityChange: hidden ? 'hidden' : 'visible',
+        adminAction: true,
+      },
+      ...userInfo,
+    });
+
     res.json({ success: true, message: 'Tool visibility updated' });
   } catch (error) {
     console.error('Error updating tool visibility:', error);
     res.status(500).json({ error: 'Failed to update tool visibility' });
   }
 });
+
 app.put('/admin/rag-system/tool/:id/boost', async (req, res) => {
   try {
     const { id } = req.params;
     const { boosted, duration, updatedBy } = req.body;
+    const userInfo = getUserInfoFromRequest(req);
+
+    // Get existing data for audit log
+    const existingTool = await ragSystemStorage.findOne({ id });
+
     let boostExpiry = null;
     if (boosted && duration) {
       boostExpiry = new Date();
@@ -1176,12 +1597,33 @@ app.put('/admin/rag-system/tool/:id/boost', async (req, res) => {
       { $set: { id, boosted, boostExpiry, updatedAt: new Date(), updatedBy: updatedBy || 'admin' } },
       { upsert: true }
     );
+
+    // Log audit for RAG tool boost update
+    await auditLogger.logAudit({
+      action: 'UPDATE',
+      resource: 'rag_tool_boost',
+      resourceId: id,
+      userId: updatedBy || 'admin',
+      userEmail: 'admin@toolmate.com',
+      role: 'admin',
+      oldData: existingTool,
+      newData: { boosted, boostExpiry, updatedAt: new Date(), updatedBy: updatedBy || 'admin' },
+      metadata: {
+        toolId: id,
+        boostStatus: boosted ? 'boosted' : 'unboosted',
+        boostDuration: duration,
+        adminAction: true,
+      },
+      ...userInfo,
+    });
+
     res.json({ success: true, message: 'Tool boost updated' });
   } catch (error) {
     console.error('Error updating tool boost:', error);
     res.status(500).json({ error: 'Failed to update tool boost' });
   }
 });
+
 app.get('/rag-system/boosted-tools', async (req, res) => {
   try {
     const boostedTools = await ragSystemStorage
@@ -1196,6 +1638,7 @@ app.get('/rag-system/boosted-tools', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch boosted tools' });
   }
 });
+
 app.get('/rag-system/hidden-tools', async (req, res) => {
   try {
     const hiddenTools = await ragSystemStorage.find({ hidden: true }).toArray();
@@ -1205,6 +1648,7 @@ app.get('/rag-system/hidden-tools', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch hidden tools' });
   }
 });
+
 app.get('/rag-system/ordered-tools', async (req, res) => {
   try {
     const now = new Date();
@@ -1225,9 +1669,12 @@ app.get('/rag-system/ordered-tools', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch ordered tools' });
   }
 });
+
 app.post('/api/v1/admin/login', (req, res) => {
   try {
     const { username, password } = req.body;
+    const userInfo = getUserInfoFromRequest(req);
+
     if (!username || !password) {
       return res.status(400).json({
         success: false,
@@ -1249,12 +1696,52 @@ app.post('/api/v1/admin/login', (req, res) => {
         permissions: ['all'],
         userEmail: 'help@toolmate.com',
       };
+
+      // Log audit for admin login
+      auditLogger.logAudit({
+        action: 'LOGIN',
+        resource: 'admin_session',
+        resourceId: null,
+        userId: 'admin',
+        userEmail: adminEmail,
+        role: 'admin',
+        newData: {
+          loginTime: new Date(),
+          username: userData.username,
+        },
+        metadata: {
+          adminAction: true,
+          loginSuccess: true,
+        },
+        ...userInfo,
+      });
+
       return res.status(200).json({
         success: true,
         message: 'Login successful',
         ...userData,
       });
     } else {
+      // Log audit for failed admin login
+      auditLogger.logAudit({
+        action: 'LOGIN_FAILED',
+        resource: 'admin_session',
+        resourceId: null,
+        userId: username,
+        userEmail: username,
+        role: 'unknown',
+        newData: {
+          attemptTime: new Date(),
+          username: username,
+        },
+        metadata: {
+          adminAction: false,
+          loginSuccess: false,
+          failureReason: 'invalid_credentials',
+        },
+        ...userInfo,
+      });
+
       return res.status(401).json({
         success: false,
         message: 'Invalid credentials',
@@ -1268,9 +1755,12 @@ app.post('/api/v1/admin/login', (req, res) => {
     });
   }
 });
+
 app.post('/shed/add', async (req, res) => {
   try {
     const { userId, toolName, category, originalPhrase, source } = req.body;
+    const userInfo = getUserInfoFromRequest(req);
+
     if (!userId || !toolName) {
       return res.status(400).json({
         success: false,
@@ -1301,6 +1791,24 @@ app.post('/shed/add', async (req, res) => {
       note: '',
     };
     const result = await shedToolsStorage.insertOne(toolData);
+
+    // Log audit for shed tool addition
+    await auditLogger.logAudit({
+      action: 'CREATE',
+      resource: 'shed_tool',
+      resourceId: result.insertedId.toString(),
+      userId: userId,
+      userEmail: userId, // Using userId as email identifier
+      role: 'user',
+      newData: toolData,
+      metadata: {
+        toolName: toolName,
+        category: category || 'Other',
+        source: source || 'chat',
+      },
+      ...userInfo,
+    });
+
     try {
       await shedToolsStorage.insertOne({
         collection: 'shed_analytics',
@@ -1325,9 +1833,11 @@ app.post('/shed/add', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
+
 app.delete('/shed/remove/:toolId', async (req, res) => {
   try {
     const { toolId } = req.params;
+    const userInfo = getUserInfoFromRequest(req);
 
     if (!ObjectId.isValid(toolId)) {
       return res.status(400).json({
@@ -1355,6 +1865,23 @@ app.delete('/shed/remove/:toolId', async (req, res) => {
         error: 'Tool not found or could not be deleted',
       });
     }
+
+    // Log audit for shed tool removal
+    await auditLogger.logAudit({
+      action: 'DELETE',
+      resource: 'shed_tool',
+      resourceId: toolId,
+      userId: toolDoc.user_id,
+      userEmail: toolDoc.user_id,
+      role: 'user',
+      oldData: toolDoc,
+      metadata: {
+        toolName: toolDoc.tool_name,
+        category: toolDoc.category,
+      },
+      ...userInfo,
+    });
+
     try {
       await shedToolsStorage.insertOne({
         collection: 'shed_analytics',
@@ -1378,6 +1905,7 @@ app.delete('/shed/remove/:toolId', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
+
 app.get('/shed/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
@@ -1408,16 +1936,29 @@ app.get('/shed/:userId', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
+
 app.put('/shed/update/:toolId', async (req, res) => {
   try {
     const { toolId } = req.params;
     const { toolName, category, note } = req.body;
+    const userInfo = getUserInfoFromRequest(req);
+
     if (!ObjectId.isValid(toolId)) {
       return res.status(400).json({
         success: false,
         error: 'Invalid tool ID format',
       });
     }
+
+    // Get existing tool data for audit log
+    const existingTool = await shedToolsStorage.findOne({ _id: new ObjectId(toolId) });
+    if (!existingTool) {
+      return res.status(404).json({
+        success: false,
+        error: 'Tool not found in shed',
+      });
+    }
+
     const updateData = {
       last_updated: new Date(),
     };
@@ -1431,6 +1972,23 @@ app.put('/shed/update/:toolId', async (req, res) => {
         error: 'Tool not found in shed',
       });
     }
+
+    // Log audit for shed tool update
+    await auditLogger.logAudit({
+      action: 'UPDATE',
+      resource: 'shed_tool',
+      resourceId: toolId,
+      userId: existingTool.user_id,
+      userEmail: existingTool.user_id,
+      role: 'user',
+      oldData: existingTool,
+      newData: updateData,
+      metadata: {
+        updatedFields: Object.keys(updateData).filter((key) => key !== 'last_updated'),
+      },
+      ...userInfo,
+    });
+
     const updatedTool = await shedToolsStorage.findOne({ _id: new ObjectId(toolId) });
     res.json({
       success: true,
@@ -1446,6 +2004,8 @@ app.put('/shed/update/:toolId', async (req, res) => {
 app.delete('/shed/clear/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
+    const userInfo = getUserInfoFromRequest(req);
+
     if (!userId) {
       return res.status(400).json({
         success: false,
@@ -1462,6 +2022,26 @@ app.delete('/shed/clear/:userId', async (req, res) => {
       });
     }
     const result = await shedToolsStorage.deleteMany({ user_id: userId });
+
+    // Log audit for shed clear
+    await auditLogger.logAudit({
+      action: 'DELETE_BULK',
+      resource: 'shed_tools',
+      resourceId: userId,
+      userId: userId,
+      userEmail: userId,
+      role: 'user',
+      oldData: {
+        toolCount: toolCount,
+        tools: tools.map((t) => ({ name: t.tool_name, category: t.category })),
+      },
+      metadata: {
+        action: 'shed_cleared',
+        toolsCount: toolCount,
+      },
+      ...userInfo,
+    });
+
     await shedToolsStorage.insertOne({
       collection: 'shed_analytics',
       user_id: userId,
@@ -1481,6 +2061,7 @@ app.delete('/shed/clear/:userId', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
+
 app.post('/shed/check-ownership', async (req, res) => {
   try {
     const { userId, toolNames } = req.body;
@@ -1517,6 +2098,7 @@ app.post('/shed/check-ownership', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
+
 app.get('/admin/shed-analytics', async (req, res) => {
   try {
     const { page = 1, limit = 50, action, userId, dateFrom, dateTo } = req.query;
@@ -1590,6 +2172,7 @@ app.get('/admin/shed-analytics', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
+
 // Get email logs for admin
 app.get('/admin/email-logs', async (req, res) => {
   try {
@@ -1715,6 +2298,7 @@ app.get('/admin/email-stats', async (req, res) => {
 app.post('/admin/email-logs/:id/resend', async (req, res) => {
   try {
     const { id } = req.params;
+    const userInfo = getUserInfoFromRequest(req);
 
     if (!ObjectId.isValid(id)) {
       return res.status(400).json({ error: 'Invalid email log ID format' });
@@ -1751,6 +2335,27 @@ app.post('/admin/email-logs/:id/resend', async (req, res) => {
         return res.status(400).json({ error: 'Unknown email type for resend' });
     }
 
+    // Log audit for email resend
+    await auditLogger.logAudit({
+      action: 'RESEND_EMAIL',
+      resource: 'email',
+      resourceId: id,
+      userId: 'admin',
+      userEmail: 'admin@toolmate.com',
+      role: 'admin',
+      newData: {
+        originalEmailId: id,
+        resendResult: result,
+        recipient: emailLog.recipient,
+        emailType: emailLog.type,
+      },
+      metadata: {
+        adminAction: true,
+        originalEmailFailed: true,
+      },
+      ...userInfo,
+    });
+
     res.json({
       message: 'Email resend attempted',
       success: result.success,
@@ -1761,6 +2366,7 @@ app.post('/admin/email-logs/:id/resend', async (req, res) => {
     res.status(500).json({ error: 'Failed to resend email' });
   }
 });
+
 // Get shed statistics for admin dashboard
 app.get('/admin/shed-stats', async (req, res) => {
   try {
@@ -1799,10 +2405,12 @@ app.get('/admin/shed-stats', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
+
 // Bulk add tools to shed (for migration or admin purposes)
 app.post('/shed/bulk-add', async (req, res) => {
   try {
     const { userId, tools } = req.body;
+    const userInfo = getUserInfoFromRequest(req);
 
     if (!userId || !Array.isArray(tools) || tools.length === 0) {
       return res.status(400).json({
@@ -1822,6 +2430,26 @@ app.post('/shed/bulk-add', async (req, res) => {
       note: tool.note || '',
     }));
     const result = await shedToolsStorage.insertMany(toolsToInsert);
+
+    // Log audit for bulk tool addition
+    await auditLogger.logAudit({
+      action: 'CREATE_BULK',
+      resource: 'shed_tools',
+      resourceId: userId,
+      userId: userId,
+      userEmail: userId,
+      role: 'user',
+      newData: {
+        toolsCount: toolsToInsert.length,
+        tools: toolsToInsert.map((t) => ({ name: t.tool_name, category: t.category })),
+      },
+      metadata: {
+        bulkImport: true,
+        source: 'bulk_import',
+      },
+      ...userInfo,
+    });
+
     // Log analytics
     await shedToolsStorage.insertOne({
       collection: 'shed_analytics',
@@ -1842,9 +2470,114 @@ app.post('/shed/bulk-add', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
+
+// NEW AUDIT LOG ENDPOINTS
+
+// Get audit logs with pagination and filtering
+app.get('/admin/audit-logs', async (req, res) => {
+  try {
+    const { page = 1, limit = 50, action, resource, userId, userEmail, role, dateFrom, dateTo, resourceId } = req.query;
+
+    const result = await auditLogger.getAuditLogs({
+      page: Number.parseInt(page),
+      limit: Number.parseInt(limit),
+      action,
+      resource,
+      userId,
+      userEmail,
+      role,
+      dateFrom,
+      dateTo,
+      resourceId,
+    });
+
+    res.json(result);
+  } catch (error) {
+    console.error('Error fetching audit logs:', error);
+    res.status(500).json({ error: 'Failed to fetch audit logs' });
+  }
+});
+
+// Get audit statistics
+app.get('/admin/audit-stats', async (req, res) => {
+  try {
+    const { dateFrom, dateTo } = req.query;
+    const stats = await auditLogger.getAuditStats(dateFrom, dateTo);
+    res.json(stats);
+  } catch (error) {
+    console.error('Error fetching audit statistics:', error);
+    res.status(500).json({ error: 'Failed to fetch audit statistics' });
+  }
+});
+
+// Get user activity
+app.get('/admin/audit-logs/user/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { limit = 20 } = req.query;
+    const activity = await auditLogger.getUserActivity(userId, Number.parseInt(limit));
+    res.json({ activity });
+  } catch (error) {
+    console.error('Error fetching user activity:', error);
+    res.status(500).json({ error: 'Failed to fetch user activity' });
+  }
+});
+
+// Get resource activity
+app.get('/admin/audit-logs/resource/:resource/:resourceId', async (req, res) => {
+  try {
+    const { resource, resourceId } = req.params;
+    const { limit = 20 } = req.query;
+    const activity = await auditLogger.getResourceActivity(resource, resourceId, Number.parseInt(limit));
+    res.json({ activity });
+  } catch (error) {
+    console.error('Error fetching resource activity:', error);
+    res.status(500).json({ error: 'Failed to fetch resource activity' });
+  }
+});
+
+// Cleanup old audit logs (admin maintenance endpoint)
+app.post('/admin/audit-logs/cleanup', async (req, res) => {
+  try {
+    const { daysToKeep = 365 } = req.body;
+    const userInfo = getUserInfoFromRequest(req);
+
+    const deletedCount = await auditLogger.cleanupOldLogs(Number.parseInt(daysToKeep));
+
+    // Log audit for cleanup action
+    await auditLogger.logAudit({
+      action: 'CLEANUP',
+      resource: 'audit_logs',
+      resourceId: null,
+      userId: 'admin',
+      userEmail: 'admin@toolmate.com',
+      role: 'admin',
+      newData: {
+        deletedCount,
+        daysToKeep: Number.parseInt(daysToKeep),
+        cleanupDate: new Date(),
+      },
+      metadata: {
+        adminAction: true,
+        maintenanceTask: true,
+      },
+      ...userInfo,
+    });
+
+    res.json({
+      message: `Cleaned up ${deletedCount} old audit logs`,
+      deletedCount,
+    });
+  } catch (error) {
+    console.error('Error cleaning up audit logs:', error);
+    res.status(500).json({ error: 'Failed to cleanup audit logs' });
+  }
+});
+
 app.use((req, res) => {
   res.status(404).send({ error: 'Not Found' });
 });
+
 app.use((err, req, res, next) => {
   console.error('Global error handler:', err.stack);
   res.status(500).send({ error: 'Something went wrong!' });
