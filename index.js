@@ -2101,7 +2101,7 @@ app.post('/shed/check-ownership', async (req, res) => {
 
 app.get('/admin/shed-analytics', async (req, res) => {
   try {
-    const { page = 1, limit = 50, action, userId, dateFrom, dateTo } = req.query;
+    const { page = 1, limit = 50, action, userId, dateFrom, dateTo, period } = req.query;
     const skip = (page - 1) * limit;
 
     const query = { collection: 'shed_analytics' };
@@ -2109,7 +2109,28 @@ app.get('/admin/shed-analytics', async (req, res) => {
     if (action) query.action = action;
     if (userId) query.user_id = userId;
 
-    if (dateFrom || dateTo) {
+    // Handle period-based filtering (similar to analytics endpoint)
+    if (period) {
+      const now = new Date();
+      const startDate = new Date();
+
+      switch (period) {
+        case '24h':
+          startDate.setHours(startDate.getHours() - 24);
+          break;
+        case '7d':
+          startDate.setDate(startDate.getDate() - 7);
+          break;
+        case '30d':
+          startDate.setDate(startDate.getDate() - 30);
+          break;
+        default:
+          startDate.setDate(startDate.getDate() - 7);
+      }
+
+      query.timestamp = { $gte: startDate };
+    } else if (dateFrom || dateTo) {
+      // Handle custom date range
       query.timestamp = {};
       if (dateFrom) query.timestamp.$gte = new Date(dateFrom);
       if (dateTo) query.timestamp.$lte = new Date(dateTo);
@@ -2121,10 +2142,12 @@ app.get('/admin/shed-analytics', async (req, res) => {
       .skip(skip)
       .limit(Number.parseInt(limit))
       .toArray();
+
     const total = await shedToolsStorage.countDocuments(query);
+
     const stats = await shedToolsStorage
       .aggregate([
-        { $match: { collection: 'shed_analytics' } },
+        { $match: { collection: 'shed_analytics', ...query } },
         {
           $group: {
             _id: '$action',
@@ -2133,12 +2156,14 @@ app.get('/admin/shed-analytics', async (req, res) => {
         },
       ])
       .toArray();
+
     const popularTools = await shedToolsStorage
       .aggregate([
         {
           $match: {
             collection: 'shed_analytics',
             action: 'tool_added',
+            ...query,
           },
         },
         {
@@ -2370,17 +2395,55 @@ app.post('/admin/email-logs/:id/resend', async (req, res) => {
 // Get shed statistics for admin dashboard
 app.get('/admin/shed-stats', async (req, res) => {
   try {
+    const { period, dateFrom, dateTo } = req.query;
+
+    let timeQuery = {};
+
+    // Handle period-based filtering
+    if (period) {
+      const now = new Date();
+      const startDate = new Date();
+
+      switch (period) {
+        case '24h':
+          startDate.setHours(startDate.getHours() - 24);
+          break;
+        case '7d':
+          startDate.setDate(startDate.getDate() - 7);
+          break;
+        case '30d':
+          startDate.setDate(startDate.getDate() - 30);
+          break;
+        default:
+          startDate.setDate(startDate.getDate() - 7);
+      }
+
+      timeQuery = { date_added: { $gte: startDate } };
+    } else if (dateFrom || dateTo) {
+      // Handle custom date range
+      timeQuery.date_added = {};
+      if (dateFrom) timeQuery.date_added.$gte = new Date(dateFrom);
+      if (dateTo) timeQuery.date_added.$lte = new Date(dateTo);
+    }
+
     const totalTools = await shedToolsStorage.countDocuments({
       collection: { $ne: 'shed_analytics' },
+      ...timeQuery,
     });
 
     const totalUsers = await shedToolsStorage.distinct('user_id', {
       collection: { $ne: 'shed_analytics' },
+      ...timeQuery,
     });
 
     const categoryStats = await shedToolsStorage
       .aggregate([
-        { $match: { collection: { $ne: 'shed_analytics' } } },
+        {
+          $match: {
+            collection: { $ne: 'shed_analytics' },
+            ...timeQuery,
+          },
+        },
         {
           $group: {
             _id: '$category',
@@ -2390,7 +2453,53 @@ app.get('/admin/shed-stats', async (req, res) => {
         { $sort: { count: -1 } },
       ])
       .toArray();
+
+    // Get tools added over time for trend analysis
+    const toolsOverTime = await shedToolsStorage
+      .aggregate([
+        {
+          $match: {
+            collection: { $ne: 'shed_analytics' },
+            ...timeQuery,
+          },
+        },
+        {
+          $group: {
+            _id: {
+              $dateToString: {
+                format: '%Y-%m-%d',
+                date: '$date_added',
+              },
+            },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ])
+      .toArray();
+
+    // Get most active users in the period
+    const mostActiveUsers = await shedToolsStorage
+      .aggregate([
+        {
+          $match: {
+            collection: { $ne: 'shed_analytics' },
+            ...timeQuery,
+          },
+        },
+        {
+          $group: {
+            _id: '$user_id',
+            toolCount: { $sum: 1 },
+          },
+        },
+        { $sort: { toolCount: -1 } },
+        { $limit: 10 },
+      ])
+      .toArray();
+
     const averageToolsPerUser = totalUsers.length > 0 ? totalTools / totalUsers.length : 0;
+
     res.json({
       success: true,
       stats: {
@@ -2398,7 +2507,32 @@ app.get('/admin/shed-stats', async (req, res) => {
         totalUsersWithTools: totalUsers.length,
         averageToolsPerUser: Math.round(averageToolsPerUser * 100) / 100,
         categoryBreakdown: categoryStats,
+        toolsOverTime: toolsOverTime,
+        mostActiveUsers: mostActiveUsers,
       },
+      period: period || 'all',
+      dateRange: period
+        ? {
+            start: (() => {
+              const startDate = new Date();
+              switch (period) {
+                case '24h':
+                  startDate.setHours(startDate.getHours() - 24);
+                  break;
+                case '7d':
+                  startDate.setDate(startDate.getDate() - 7);
+                  break;
+                case '30d':
+                  startDate.setDate(startDate.getDate() - 30);
+                  break;
+                default:
+                  startDate.setDate(startDate.getDate() - 7);
+              }
+              return startDate;
+            })(),
+            end: new Date(),
+          }
+        : null,
     });
   } catch (error) {
     console.error('Error fetching shed statistics:', error);
