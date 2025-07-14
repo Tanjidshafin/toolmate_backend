@@ -22,7 +22,7 @@ module.exports = (dependencies) => {
       await auditLogger.logAudit({
         action: 'VIEW_JOB_LOGS',
         resource: 'job_log',
-        resourceId: userId,
+        resourceEmail: userEmail,
         userId: userInfo.userId,
         userEmail: userInfo.userEmail,
         role: userInfo.role,
