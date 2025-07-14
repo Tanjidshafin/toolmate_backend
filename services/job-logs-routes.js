@@ -9,7 +9,7 @@ module.exports = (dependencies) => {
       const { page = 1, limit = 100 } = req.query;
       const skip = (page - 1) * limit;
       const query = {
-        $or: [{ userEmail: userEmail }, { userEmail: { $in: [userEmail] } }],
+        userEmail: userEmail,
       };
       const logs = await chatLogsStorage
         .find(query)
