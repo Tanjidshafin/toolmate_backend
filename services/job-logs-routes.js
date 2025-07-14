@@ -3,16 +3,13 @@ const router = express.Router();
 
 module.exports = (dependencies) => {
   const { chatLogsStorage, usersStorage, auditLogger, ObjectId, getUserInfoFromRequest } = dependencies;
-  router.get('/job-logs/:userId', async (req, res) => {
+  router.get('/job-logs/:userEmail', async (req, res) => {
     try {
-      const { userId } = req.params;
+      const { userEmail } = req.params;
       const { page = 1, limit = 100 } = req.query;
       const skip = (page - 1) * limit;
       const query = {
-        $or: [
-          { userEmail: userId },
-          { userEmail: { $in: [userId] } },
-        ],
+        $or: [{ userEmail: userEmail }, { userEmail: { $in: [userEmail] } }],
       };
       const logs = await chatLogsStorage
         .find(query)
@@ -37,7 +34,6 @@ module.exports = (dependencies) => {
         ipAddress: userInfo.ipAddress,
         userAgent: userInfo.userAgent,
       });
-
       res.json({
         success: true,
         jobLogs: logs,
