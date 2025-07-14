@@ -136,7 +136,7 @@ module.exports = (dependencies) => {
       }
 
       const updateData = {
-        'metadata.notes': notes, // Assuming notes are stored in metadata
+        'metadata.notes': notes,
         updatedAt: new Date(),
       };
 

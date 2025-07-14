@@ -55,6 +55,7 @@ let shedToolsStorage;
 let emailLogsStorage;
 let auditLogsStorage;
 let jobLogsStorage;
+let adminCredentialsStorage;
 let emailService;
 let emailTriggers;
 let auditLogger;
@@ -78,12 +79,11 @@ async function run() {
     emailLogsStorage = client.db('Toolmate').collection('EmailLogs');
     auditLogsStorage = client.db('Toolmate').collection('AuditLogs');
     jobLogsStorage = client.db('Toolmate').collection('JobLogs');
-    // Initialize services
+    adminCredentialsStorage = client.db('Toolmate').collection('AdminCredentials');
     emailService = new EmailService(emailLogsStorage);
     emailTriggers = new EmailTriggers(emailService);
     auditLogger = new AuditLogger(auditLogsStorage);
     clerkClient = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
-    // Helper function to get user info from request
     function getUserInfoFromRequest(req) {
       return {
         ipAddress: req.ip || req.connection.remoteAddress,
@@ -215,6 +215,7 @@ async function run() {
       emailLogsStorage,
       auditLogsStorage,
       jobLogsStorage,
+      adminCredentialsStorage,
       emailService,
       emailTriggers,
       auditLogger,
@@ -223,9 +224,8 @@ async function run() {
       getUserInfoFromRequest,
       emitNewLiveMessage,
       notifyActiveSessionsChanged,
-      io, 
+      io,
     };
-    // Mount route modules
     app.get('/', (req, res) => {
       res.send('Welcome to Toolmate');
     });
