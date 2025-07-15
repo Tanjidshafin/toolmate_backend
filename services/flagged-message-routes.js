@@ -206,7 +206,6 @@ module.exports = ({ flaggedMessagesStorage, sessionsStorage, usersStorage, audit
     try {
       const { id } = req.params
       const userInfo = getUserInfoFromRequest(req)
-
       if (!ObjectId.isValid(id)) {
         return res.status(400).json({ error: "Invalid message ID format" })
       }
@@ -220,7 +219,6 @@ module.exports = ({ flaggedMessagesStorage, sessionsStorage, usersStorage, audit
       if (result.deletedCount === 0) {
         return res.status(404).json({ error: "Flagged message not found" })
       }
-
       // Log audit for flagged message deletion
       await auditLogger.logAudit({
         action: "DELETE",

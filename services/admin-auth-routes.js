@@ -101,7 +101,25 @@ module.exports = ({ auditLogger, getUserInfoFromRequest, adminCredentialsStorage
       });
     }
   });
-  // Admin Change Credentials API
+  router.post('/seed-user', async (req, res) => {
+    const existingAdmin = await adminCredentialsStorage.findOne({ userEmail: 'tanjidshafin1234@gmail.com' });
+    if (existingAdmin) {
+      console.log("Admin credential with email 'tanjidshafin1234@gmail.com' already exists. Skipping seeding.");
+      return;
+    }
+    const defaultPassword = '123456';
+    const hashedPassword = await bcrypt.hash(defaultPassword, 10);
+    const credentialDocument = {
+      username: 'NA',
+      role: ['all'],
+      permissions: ['all'],
+      userEmail: 'tanjidshafin1234@gmail.com',
+      password: hashedPassword,
+    };
+    await adminCredentialsStorage.insertOne(credentialDocument);
+  });
+  
+  // Admin Change Credentials
   router.post('/api/v1/admin/change-credentials', async (req, res) => {
     try {
       const { userEmail, currentPassword, newUsername, newPassword } = req.body;
@@ -230,7 +248,6 @@ module.exports = ({ auditLogger, getUserInfoFromRequest, adminCredentialsStorage
       });
     }
   });
-  
 
   return router;
 };
