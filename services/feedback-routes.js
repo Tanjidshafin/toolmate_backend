@@ -63,7 +63,10 @@ module.exports = ({
           const existingLog = await chatLogsStorage.findOne({ mateyResponse: data.messageText });
           if (existingLog) {
             await chatLogsStorage.updateOne(
-              { mateyResponse: data.messageText },
+              {
+                mateyResponse: data.messageText,
+                userEmail: data.email,
+              },
               {
                 $set: {
                   flagTriggered: true,
