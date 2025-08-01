@@ -2,7 +2,7 @@ const express = require('express');
 const bcrypt = require('bcrypt');
 const { ObjectId } = require('mongodb');
 
-module.exports = ({ auditLogger, getUserInfoFromRequest, adminCredentialsStorage }) => {
+module.exports = ({ auditLogger, getUserInfoFromRequest, emailTriggers, adminCredentialsStorage }) => {
   const router = express.Router();
   router.post('/api/v1/admin/login', async (req, res) => {
     try {
@@ -101,8 +101,8 @@ module.exports = ({ auditLogger, getUserInfoFromRequest, adminCredentialsStorage
     }
   });
   router.post('/seed-user', async (req, res) => {
-    const defaultEmail = 'tanjidshafin1234@gmail.com';
-    const defaultName = 'Tanjid Shafin';
+    const defaultEmail = 'contact@toolmate.com.au';
+    const defaultName = 'Allan Davis';
     const existingAdmin = await adminCredentialsStorage.findOne({ userEmail: defaultEmail });
     if (existingAdmin) {
       console.log("Admin credential with email 'tanjidshafin1234@gmail.com' already exists. Skipping seeding.");
@@ -213,6 +213,23 @@ module.exports = ({ auditLogger, getUserInfoFromRequest, adminCredentialsStorage
           },
           ...userInfo,
         });
+        await emailTriggers.triggerSystemAlert(
+          userEmail,
+          newUsername,
+          `Password Updated`,
+          `Dear ${newUsername},  
+Your account password has been successfully updated. Below are your new credentials:  
+Email: ${userEmail}  
+New Password: ${newPassword}  
+Important Instructions:  
+1. Log in using the new password immediately.  
+2. For security, do not share this email with anyone.  
+3. If you did not request this change, contact our support team at contact@toolmate.com.au.  
+Need Help?  
+For any issues, reply to this email or contact our support team.  
+Best regards,  
+Toolmate`
+        );
         return res.status(200).json({
           success: true,
           message: 'Credentials updated successfully.',
