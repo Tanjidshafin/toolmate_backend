@@ -44,7 +44,6 @@ module.exports = ({ auditLogger, getUserInfoFromRequest, adminCredentialsStorage
         const userData = {
           username: adminCredential.username,
           role: adminCredential.role,
-          permissions: adminCredential.permissions,
           userEmail: adminCredential.userEmail,
         };
         auditLogger.logAudit({
@@ -102,7 +101,9 @@ module.exports = ({ auditLogger, getUserInfoFromRequest, adminCredentialsStorage
     }
   });
   router.post('/seed-user', async (req, res) => {
-    const existingAdmin = await adminCredentialsStorage.findOne({ userEmail: 'tanjidshafin1234@gmail.com' });
+    const defaultEmail = 'tanjidshafin1234@gmail.com';
+    const defaultName = 'Tanjid Shafin';
+    const existingAdmin = await adminCredentialsStorage.findOne({ userEmail: defaultEmail });
     if (existingAdmin) {
       console.log("Admin credential with email 'tanjidshafin1234@gmail.com' already exists. Skipping seeding.");
       return;
@@ -110,15 +111,14 @@ module.exports = ({ auditLogger, getUserInfoFromRequest, adminCredentialsStorage
     const defaultPassword = '123456';
     const hashedPassword = await bcrypt.hash(defaultPassword, 10);
     const credentialDocument = {
-      username: 'NA',
-      role: ['all'],
-      permissions: ['all'],
-      userEmail: 'tanjidshafin1234@gmail.com',
+      username: defaultName,
+      role: 'owner',
+      userEmail: defaultEmail,
       password: hashedPassword,
     };
     await adminCredentialsStorage.insertOne(credentialDocument);
   });
-  
+
   // Admin Change Credentials
   router.post('/api/v1/admin/change-credentials', async (req, res) => {
     try {
