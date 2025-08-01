@@ -52,7 +52,7 @@ module.exports = ({ auditLogger, getUserInfoFromRequest, adminCredentialsStorage
           resourceId: adminCredential._id,
           userId: adminCredential.userEmail,
           userEmail: adminCredential.userEmail,
-          role: adminCredential.role.join(','),
+          role: adminCredential.role,
           newData: {
             loginTime: new Date(),
             username: userData.username,
@@ -75,7 +75,7 @@ module.exports = ({ auditLogger, getUserInfoFromRequest, adminCredentialsStorage
           resourceId: adminCredential._id,
           userId: username,
           userEmail: username,
-          role: adminCredential.role.join(','),
+          role: adminCredential.role,
           newData: {
             attemptTime: new Date(),
             username: username,
@@ -162,7 +162,7 @@ module.exports = ({ auditLogger, getUserInfoFromRequest, adminCredentialsStorage
           resourceId: adminCredential._id,
           userId: userEmail,
           userEmail: userEmail,
-          role: adminCredential.role.join(','),
+          role: adminCredential.role,
           newData: {
             attemptTime: new Date(),
             reason: 'Invalid current password',
@@ -200,7 +200,7 @@ module.exports = ({ auditLogger, getUserInfoFromRequest, adminCredentialsStorage
           resourceId: adminCredential._id,
           userId: userEmail,
           userEmail: userEmail,
-          role: adminCredential.role.join(','),
+          role: adminCredential.role,
           newData: {
             updatedFields: Object.keys(updateFields),
             oldUsername: adminCredential.username,
@@ -224,7 +224,7 @@ module.exports = ({ auditLogger, getUserInfoFromRequest, adminCredentialsStorage
           resourceId: adminCredential._id,
           userId: userEmail,
           userEmail: userEmail,
-          role: adminCredential.role.join(','),
+          role: adminCredential.role,
           newData: {
             attemptTime: new Date(),
             reason: 'No changes applied or document not found for update',
