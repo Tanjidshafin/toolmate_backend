@@ -1,74 +1,68 @@
-const express = require("express")
-const { ObjectId } = require("mongodb")
+const express = require('express');
+const { ObjectId } = require('mongodb');
 
 module.exports = ({ toolsStorage, auditLogger, getUserInfoFromRequest }) => {
-  const router = express.Router()
-
-  router.post("/store-suggested-tools", async (req, res) => {
+  const router = express.Router();
+  router.post('/store-suggested-tools', async (req, res) => {
     try {
-      const data = req.body
-      const userInfo = getUserInfoFromRequest(req)
-      const emailArray = data.userEmail
+      const data = req.body;
+      const userInfo = getUserInfoFromRequest(req);
       const existingUser = await toolsStorage.findOne({
-        userEmail: { $elemMatch: { $in: emailArray } },
+        userEmail: data.userEmail,
         userName: data.userName,
-      })
+      });
       if (existingUser) {
-        const oldData = { suggestedTools: existingUser.suggestedTools }
+        const newToolsToAdd = data.suggestedTools.filter(
+          (newTool) => !existingUser.suggestedTools.some((oldTool) => oldTool.id === newTool.id)
+        );
+        const updatedSuggestedTools = [...existingUser.suggestedTools, ...newToolsToAdd];
+        const oldData = { suggestedTools: existingUser.suggestedTools };
         const result = await toolsStorage.updateOne(
           { _id: existingUser._id },
-          {
-            $set: {
-              suggestedTools: data.suggestedTools,
-            },
-          },
-        )
-        // Log audit for tools update
+          { $set: { suggestedTools: updatedSuggestedTools } }
+        );
         await auditLogger.logAudit({
-          action: "UPDATE",
-          resource: "suggested_tools",
+          action: 'UPDATE',
+          resource: 'suggested_tools',
           resourceId: existingUser._id.toString(),
-          userId: data.userEmail?.[0] || data.userEmail,
-          userEmail: data.userEmail?.[0] || data.userEmail,
-          role: "user",
+          userId: data.userEmail,
+          userEmail: data.userEmail,
+          role: 'user',
           oldData,
-          newData: { suggestedTools: data.suggestedTools },
+          newData: { suggestedTools: updatedSuggestedTools },
           ...userInfo,
-        })
-
-        res.send({ updated: true, result })
+        });
+        res.send({ updated: true, result });
       } else {
-        const result = await toolsStorage.insertOne(data)
-        // Log audit for tools creation
+        const result = await toolsStorage.insertOne(data);
         await auditLogger.logAudit({
-          action: "CREATE",
-          resource: "suggested_tools",
+          action: 'CREATE',
+          resource: 'suggested_tools',
           resourceId: result.insertedId.toString(),
-          userId: data.userEmail?.[0] || data.userEmail,
-          userEmail: data.userEmail?.[0] || data.userEmail,
-          role: "user",
+          userId: data.userEmail,
+          userEmail: data.userEmail,
+          role: 'user',
           newData: data,
           ...userInfo,
-        })
-
-        res.send({ inserted: true, result })
+        });
+        res.send({ inserted: true, result });
       }
     } catch (error) {
-      console.error("Error storing suggested tools:", error)
-      res.status(500).send({ error: "Internal server error" })
+      console.error('Error storing suggested tools:', error);
+      res.status(500).send({ error: 'Internal server error' });
     }
-  })
+  });
 
-  router.get("/tools/:email", async (req, res) => {
+  router.get('/tools/:email', async (req, res) => {
     try {
-      const email = req.params.email
-      const query = { userEmail: email }
-      const result = await toolsStorage.find(query).toArray()
-      res.send(result)
+      const email = req.params.email;
+      const query = { userEmail: email };
+      const result = await toolsStorage.findOne(query);
+      res.send(result.suggestedTools);
     } catch (error) {
-      res.status(500).send(error)
+      res.status(500).send(error);
     }
-  })
+  });
 
-  return router
-}
+  return router;
+};
