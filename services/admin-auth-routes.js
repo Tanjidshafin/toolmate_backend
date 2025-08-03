@@ -217,18 +217,21 @@ module.exports = ({ auditLogger, getUserInfoFromRequest, emailTriggers, adminCre
           userEmail,
           newUsername,
           `Password Updated`,
-          `Dear ${newUsername},  
-Your account password has been successfully updated. Below are your new credentials:  
+          `G’day ${newUsername.split(' ')[0]},
+
+Just letting you know, your ToolMate account password’s been updated and you’re all set. Here’s what you’ll need to log in:
 Email: ${userEmail}  
-New Password: ${newPassword}  
-Important Instructions:  
-1. Log in using the new password immediately.  
-2. For security, do not share this email with anyone.  
-3. If you did not request this change, contact our support team at contact@toolmate.com.au.  
-Need Help?  
-For any issues, reply to this email or contact our support team.  
-Best regards,  
-Toolmate`
+New Password: ${newPassword}
+A couple of quick tips, mate:
+1. Jump in and log on with your new password when you get a sec.
+2. Keep this email private — don’t go sharing your password with anyone.
+3. If you didn’t ask for this change, give us a shout at contact@toolmate.com.au and we’ll sort it out.
+
+Got any dramas or need a hand with anything?
+Just reply to this email or reach out to our support crew.
+
+Catch you soon,  
+Matey from ToolMate`
         );
         return res.status(200).json({
           success: true,
