@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const { createClerkClient } = require('@clerk/clerk-sdk-node');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
-const OpenAI = require('openai'); 
+const OpenAI = require('openai');
 const EmailService = require('./services/emailService');
 const EmailTriggers = require('./services/emailTriggers');
 const AuditLogger = require('./services/auditLogs');
@@ -33,6 +33,7 @@ const shedToolRoutes = require('./services/shed-tool-routes');
 const emailLogRoutes = require('./services/email-log-routes');
 const auditLogRoutes = require('./services/audit-log-routes');
 const jobLogsRoutes = require('./services/job-logs-routes');
+const subscriptionRoutes = require('./services/subscription-routes');
 app.use(cors());
 app.use(express.json());
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.pcjdk.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
@@ -55,6 +56,7 @@ let shedToolsStorage;
 let emailLogsStorage;
 let auditLogsStorage;
 let jobLogsStorage;
+let subscriptionStorage;
 let adminCredentialsStorage;
 let emailService;
 let emailTriggers;
@@ -80,6 +82,7 @@ async function run() {
     auditLogsStorage = client.db('Toolmate').collection('AuditLogs');
     jobLogsStorage = client.db('Toolmate').collection('JobLogs');
     adminCredentialsStorage = client.db('Toolmate').collection('AdminCredentials');
+    subscriptionStorage = client.db('Toolmate').collection('Subscriptions');
     emailService = new EmailService(emailLogsStorage);
     emailTriggers = new EmailTriggers(emailService);
     auditLogger = new AuditLogger(auditLogsStorage);
@@ -221,6 +224,7 @@ async function run() {
       auditLogger,
       clerkClient,
       ObjectId,
+      subscriptionStorage,
       getUserInfoFromRequest,
       emitNewLiveMessage,
       notifyActiveSessionsChanged,
@@ -243,6 +247,7 @@ async function run() {
     app.use('/', emailLogRoutes(routeDependencies));
     app.use('/', auditLogRoutes(routeDependencies));
     app.use('/', jobLogsRoutes(routeDependencies));
+    app.use('/', subscriptionRoutes(routeDependencies));
     // Error handling middleware
     app.use((req, res) => {
       res.status(404).send({ error: 'Not Found' });
