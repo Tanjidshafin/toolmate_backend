@@ -10,8 +10,10 @@ module.exports = (dependencies) => {
     sessionsStorage,
     messagesStorage,
     shedToolsStorage,
+    subscriptionStorage,
   } = dependencies
   const router = express.Router()
+  // Get user subscription details
   router.get("/api/subscription/:userEmail", async (req, res) => {
     try {
       const { userEmail } = req.params
@@ -32,22 +34,72 @@ module.exports = (dependencies) => {
       }
       const [totalSessions, totalMessages, toolsInShed] = await Promise.all([
         sessionsStorage
-          ? sessionsStorage.countDocuments({
-              $or: [{ userEmail: userEmail }, { userEmail: { $in: [userEmail] } }],
-            })
+          ? (async () => {
+              const sessionQuery = {
+                $or: [{ userEmail: userEmail }, { userEmail: { $in: [userEmail] } }],
+              }
+              console.log("Session query:", JSON.stringify(sessionQuery)) 
+              const count = await sessionsStorage.countDocuments(sessionQuery)
+              console.log("Sessions found:", count) 
+              return count
+            })()
           : 0,
+
+        // Count messages - userEmail can be string or array
         messagesStorage
-          ? messagesStorage.countDocuments({
-              $or: [{ userEmail: userEmail }, { userEmail: { $in: [userEmail] } }],
-            })
+          ? (async () => {
+              const messageQuery = {
+                $or: [{ userEmail: userEmail }, { userEmail: { $in: [userEmail] } }],
+              }
+              console.log("Message query:", JSON.stringify(messageQuery)) // Debug log
+              const count = await messagesStorage.countDocuments(messageQuery)
+              console.log("Messages found:", count) // Debug log
+              return count
+            })()
           : 0,
+
+        // Count shed tools - uses user_id field with Clerk user ID
         shedToolsStorage
-          ? shedToolsStorage.countDocuments({
-              user_id: userEmail,
-              collection: { $ne: "shed_analytics" },
-            })
+          ? (async () => {
+              // Use Clerk user ID for shed tools, not email
+              const userIdToQuery = user.clerkId || userEmail
+              const shedQuery = {
+                user_id: userIdToQuery,
+                collection: { $ne: "shed_analytics" }, // Exclude analytics entries
+              }
+              console.log("Shed query:", JSON.stringify(shedQuery)) // Debug log
+              const count = await shedToolsStorage.countDocuments(shedQuery)
+              console.log("Shed tools found:", count) // Debug log
+
+              // Also check what tools exist for debugging
+              const tools = await shedToolsStorage.find(shedQuery).limit(5).toArray()
+              console.log(
+                "Sample shed tools:",
+                tools.map((t) => ({ name: t.tool_name, user_id: t.user_id, collection: t.collection })),
+              ) // Debug log
+
+              // Also check if there are any tools with email as user_id (fallback)
+              if (count === 0 && user.clerkId) {
+                const emailQuery = {
+                  user_id: userEmail,
+                  collection: { $ne: "shed_analytics" },
+                }
+                console.log("Trying email fallback query:", JSON.stringify(emailQuery)) // Debug log
+                const emailCount = await shedToolsStorage.countDocuments(emailQuery)
+                console.log("Shed tools found with email:", emailCount) // Debug log
+                if (emailCount > 0) {
+                  return emailCount
+                }
+              }
+
+              return count
+            })()
           : 0,
       ])
+
+      console.log("Final usage stats:", { totalSessions, totalMessages, toolsInShed }) // Debug log
+
+      // Get last activity from sessions
       let lastActivity = user.updatedAt
       try {
         const lastSession = await sessionsStorage.findOne(
@@ -62,6 +114,8 @@ module.exports = (dependencies) => {
       } catch (error) {
         console.warn("Could not fetch last session:", error.message)
       }
+
+      // Prepare subscription data based on actual schema
       const subscriptionData = {
         user: {
           id: user._id,
@@ -89,99 +143,69 @@ module.exports = (dependencies) => {
           lastActivity,
         },
       }
+
+      console.log("Returning subscription data:", subscriptionData) // Debug log
       res.json(subscriptionData)
     } catch (error) {
       console.error("Error fetching subscription details:", error)
       res.status(500).json({ error: "Failed to fetch subscription details" })
     }
   })
-  // Get purchase logs for user
+
+  // Get purchase logs for user (based on real data)
   router.get("/api/subscription/:userEmail/purchase-logs", async (req, res) => {
     try {
       const { userEmail } = req.params
       const { page = 1, limit = 10 } = req.query
+
       if (!userEmail) {
         return res.status(400).json({ error: "User email is required" })
       }
+
       const user = await usersStorage.findOne({ userEmail })
+
       if (!user) {
         return res.status(404).json({ error: "User not found" })
       }
-      const purchaseLogs = []
-      if (user.isSubscribed) {
-        purchaseLogs.push({
-          id: new ObjectId().toString(),
-          type: "purchase",
-          description: "Best Mate Premium Subscription",
-          amount: 29.99,
-          currency: "AUD",
-          status: "completed",
-          date: user.createdAt || new Date(),
-        })
+
+      // Fetch real purchase logs from subscriptionStorage
+      const userIdToQuery = user.clerkId || userEmail
+
+      const purchaseLogsQuery = {
+        $or: [{ userEmail: userEmail }, { userId: userIdToQuery }, { clerkId: user.clerkId }],
       }
-      if (user.createdAt) {
-        purchaseLogs.push({
-          id: new ObjectId().toString(),
-          type: "account_created",
-          description: "Account created",
-          amount: 0,
-          currency: "AUD",
-          status: "completed",
-          date: user.createdAt,
-        })
-      }
-      if (user.isBanned && user.bannedAt) {
-        purchaseLogs.push({
-          id: new ObjectId().toString(),
-          type: "suspension",
-          description: "Account suspended",
-          amount: 0,
-          currency: "AUD",
-          status: "completed",
-          date: user.bannedAt,
-        })
-      }
-      try {
-        if (shedToolsStorage) {
-          const shedActivities = await shedToolsStorage
-            .find({
-              collection: "shed_analytics",
-              user_id: userEmail,
-              action: { $in: ["shed_cleared", "bulk_import"] },
-            })
-            .sort({ timestamp: -1 })
-            .limit(5)
-            .toArray()
-          shedActivities.forEach((activity) => {
-            purchaseLogs.push({
-              id: new ObjectId().toString(),
-              type: activity.action,
-              description:
-                activity.action === "shed_cleared"
-                  ? `Shed cleared (${activity.tools_count || 0} tools removed)`
-                  : `Bulk import (${activity.tools_count || 0} tools added)`,
-              amount: 0,
-              currency: "AUD",
-              status: "completed",
-              date: activity.timestamp,
-            })
-          })
-        }
-      } catch (error) {
-        console.warn("Could not fetch shed analytics:", error.message)
-      }
-      const sortedLogs = purchaseLogs.sort((a, b) => new Date(b.date) - new Date(a.date))
-      const startIndex = (page - 1) * limit
-      const endIndex = startIndex + Number.parseInt(limit)
-      const paginatedLogs = sortedLogs.slice(startIndex, endIndex)
+
+      const totalLogs = await subscriptionStorage.countDocuments(purchaseLogsQuery)
+
+      const purchaseLogs = await subscriptionStorage
+        .find(purchaseLogsQuery)
+        .sort({ date: -1, createdAt: -1, timestamp: -1 })
+        .skip((page - 1) * limit)
+        .limit(Number.parseInt(limit))
+        .toArray()
+
+      // Transform the logs to match expected format
+      const formattedLogs = purchaseLogs.map((log) => ({
+        id: log._id.toString(),
+        type: log.type || log.action || "transaction",
+        description: log.description || log.title || "Transaction",
+        amount: log.amount || 0,
+        currency: log.currency || "AUD",
+        status: log.status || "completed",
+        date: log.date || log.createdAt || log.timestamp || new Date(),
+        reason: log.reason || null,
+        feedback: log.feedback || null,
+        metadata: log.metadata || {},
+      }))
+
       res.json({
-        purchaseLogs: paginatedLogs,
+        purchaseLogs: formattedLogs,
         pagination: {
           currentPage: Number.parseInt(page),
-          totalPages: Math.ceil(sortedLogs.length / limit),
-          totalLogs: sortedLogs.length,
-          hasNext: endIndex < sortedLogs.length,
-          hasPrev: startIndex > 0,
+          totalPages: Math.ceil(totalLogs / limit),
+          totalLogs: totalLogs,
+          hasNext: page * limit < totalLogs,
+          hasPrev: page > 1,
         },
       })
     } catch (error) {
@@ -189,22 +213,102 @@ module.exports = (dependencies) => {
       res.status(500).json({ error: "Failed to fetch purchase logs" })
     }
   })
-  // Cancel subscription
+
+  // POST API to add purchase logs to subscriptionStorage
+  router.post("/api/subscription/:userEmail/purchase-logs", async (req, res) => {
+    try {
+      const { userEmail } = req.params
+      const { type, description, amount, currency, status, reason, feedback, metadata } = req.body
+      const userInfo = getUserInfoFromRequest(req)
+
+      if (!userEmail) {
+        return res.status(400).json({ error: "User email is required" })
+      }
+
+      if (!type || !description) {
+        return res.status(400).json({ error: "Type and description are required" })
+      }
+
+      const user = await usersStorage.findOne({ userEmail })
+
+      if (!user) {
+        return res.status(404).json({ error: "User not found" })
+      }
+
+      // Create new purchase log entry
+      const logEntry = {
+        userEmail: userEmail,
+        userId: user.clerkId || userEmail,
+        clerkId: user.clerkId,
+        userName: user.userName,
+        type: type,
+        description: description,
+        amount: amount || 0,
+        currency: currency || "AUD",
+        status: status || "completed",
+        date: new Date(),
+        createdAt: new Date(),
+        reason: reason || null,
+        feedback: feedback || null,
+        metadata: {
+          ...metadata,
+          ...userInfo,
+          addedBy: "system",
+        },
+      }
+
+      const result = await subscriptionStorage.insertOne(logEntry)
+
+      // Log audit trail
+      await auditLogger.logAudit({
+        action: "CREATE_PURCHASE_LOG",
+        resource: "subscription_log",
+        resourceId: result.insertedId.toString(),
+        userId: user._id.toString(),
+        userEmail: userEmail,
+        role: user.role || "user",
+        newData: logEntry,
+        metadata: {
+          logType: type,
+          ...userInfo,
+        },
+      })
+
+      res.json({
+        success: true,
+        message: "Purchase log added successfully",
+        logId: result.insertedId,
+        log: {
+          ...logEntry,
+          id: result.insertedId.toString(),
+        },
+      })
+    } catch (error) {
+      console.error("Error adding purchase log:", error)
+      res.status(500).json({ error: "Failed to add purchase log" })
+    }
+  })
+
+  // Cancel subscription (update isSubscribed to false and add log)
   router.post("/api/subscription/:userEmail/cancel", async (req, res) => {
     try {
       const { userEmail } = req.params
       const { reason, feedback } = req.body
       const userInfo = getUserInfoFromRequest(req)
+
       if (!userEmail) {
         return res.status(400).json({ error: "User email is required" })
       }
+
       const user = await usersStorage.findOne({ userEmail })
       if (!user) {
         return res.status(404).json({ error: "User not found" })
       }
+
       if (!user.isSubscribed) {
         return res.status(400).json({ error: "No active subscription to cancel" })
       }
+
       // Update user subscription status
       const updateData = {
         isSubscribed: false,
@@ -213,7 +317,32 @@ module.exports = (dependencies) => {
         subscriptionCancelFeedback: feedback || null,
         updatedAt: new Date(),
       }
+
       await usersStorage.updateOne({ userEmail }, { $set: updateData })
+
+      // Add cancellation log to subscriptionStorage
+      const cancellationLog = {
+        userEmail: userEmail,
+        userId: user.clerkId || userEmail,
+        clerkId: user.clerkId,
+        userName: user.userName,
+        type: "cancellation",
+        description: "Subscription cancelled",
+        amount: 0,
+        currency: "AUD",
+        status: "completed",
+        date: new Date(),
+        createdAt: new Date(),
+        reason: reason || "User requested cancellation",
+        feedback: feedback || null,
+        metadata: {
+          ...userInfo,
+          previousPlan: user.isSubscribed ? "premium" : "free",
+        },
+      }
+
+      await subscriptionStorage.insertOne(cancellationLog)
+
       // Log audit trail
       await auditLogger.logAudit({
         action: "CANCEL_SUBSCRIPTION",
@@ -232,6 +361,7 @@ module.exports = (dependencies) => {
           ...userInfo,
         },
       })
+
       res.json({
         success: true,
         message: "Subscription cancelled successfully",
@@ -243,28 +373,56 @@ module.exports = (dependencies) => {
       res.status(500).json({ error: "Failed to cancel subscription" })
     }
   })
-  // Reactivate subscription
+
+  // Reactivate subscription (update isSubscribed to true and add log)
   router.post("/api/subscription/:userEmail/reactivate", async (req, res) => {
     try {
       const { userEmail } = req.params
       const userInfo = getUserInfoFromRequest(req)
+
       if (!userEmail) {
         return res.status(400).json({ error: "User email is required" })
       }
+
       const user = await usersStorage.findOne({ userEmail })
       if (!user) {
         return res.status(404).json({ error: "User not found" })
       }
+
       if (user.isSubscribed) {
         return res.status(400).json({ error: "Subscription is already active" })
       }
+
       // Update user subscription status
       const updateData = {
         isSubscribed: true,
         subscriptionReactivatedAt: new Date(),
         updatedAt: new Date(),
       }
+
       await usersStorage.updateOne({ userEmail }, { $set: updateData })
+
+      // Add reactivation log to subscriptionStorage
+      const reactivationLog = {
+        userEmail: userEmail,
+        userId: user.clerkId || userEmail,
+        clerkId: user.clerkId,
+        userName: user.userName,
+        type: "reactivation",
+        description: "Subscription reactivated",
+        amount: 29.99,
+        currency: "AUD",
+        status: "completed",
+        date: new Date(),
+        createdAt: new Date(),
+        metadata: {
+          ...userInfo,
+          newPlan: "premium",
+        },
+      }
+
+      await subscriptionStorage.insertOne(reactivationLog)
+
       // Log audit trail
       await auditLogger.logAudit({
         action: "REACTIVATE_SUBSCRIPTION",
@@ -290,6 +448,8 @@ module.exports = (dependencies) => {
       res.status(500).json({ error: "Failed to reactivate subscription" })
     }
   })
+
+  // Get detailed usage breakdown
   router.get("/api/subscription/:userEmail/usage-details", async (req, res) => {
     try {
       const { userEmail } = req.params
@@ -297,6 +457,12 @@ module.exports = (dependencies) => {
       if (!userEmail) {
         return res.status(400).json({ error: "User email is required" })
       }
+
+      const user = await usersStorage.findOne({ userEmail })
+      if (!user) {
+        return res.status(404).json({ error: "User not found" })
+      }
+
       // Get detailed usage statistics
       const [sessionStats, messageStats, shedStats] = await Promise.all([
         // Session statistics
@@ -320,6 +486,7 @@ module.exports = (dependencies) => {
               ])
               .toArray()
           : [{ totalSessions: 0, flaggedSessions: 0, budgetTiers: [], lastSession: null }],
+
         // Message statistics
         messagesStorage
           ? messagesStorage
@@ -344,13 +511,14 @@ module.exports = (dependencies) => {
               ])
               .toArray()
           : [{ totalMessages: 0, totalConversations: 0 }],
-        // Shed statistics
+
+        // Shed statistics using Clerk user ID
         shedToolsStorage
           ? shedToolsStorage
               .aggregate([
                 {
                   $match: {
-                    user_id: userEmail,
+                    user_id: user.clerkId || userEmail,
                     collection: { $ne: "shed_analytics" },
                   },
                 },
@@ -365,6 +533,7 @@ module.exports = (dependencies) => {
               .toArray()
           : [],
       ])
+
       const sessionData = sessionStats[0] || {
         totalSessions: 0,
         flaggedSessions: 0,
@@ -372,10 +541,13 @@ module.exports = (dependencies) => {
         lastSession: null,
       }
       const messageData = messageStats[0] || { totalMessages: 0, totalConversations: 0 }
+
+      // Process budget tier distribution
       const budgetTierCounts = sessionData.budgetTiers.reduce((acc, tier) => {
         acc[tier] = (acc[tier] || 0) + 1
         return acc
       }, {})
+
       res.json({
         sessions: {
           total: sessionData.totalSessions,
@@ -403,6 +575,86 @@ module.exports = (dependencies) => {
     } catch (error) {
       console.error("Error fetching usage details:", error)
       res.status(500).json({ error: "Failed to fetch usage details" })
+    }
+  })
+
+  // Bulk create initial purchase logs for existing users
+  router.post("/api/subscription/admin/seed-purchase-logs", async (req, res) => {
+    try {
+      const userInfo = getUserInfoFromRequest(req)
+
+      // Get all users
+      const users = await usersStorage.find({}).toArray()
+      let logsCreated = 0
+
+      for (const user of users) {
+        const userIdToQuery = user.clerkId || user.userEmail
+
+        // Check if user already has logs
+        const existingLogs = await subscriptionStorage.countDocuments({
+          $or: [{ userEmail: user.userEmail }, { userId: userIdToQuery }, { clerkId: user.clerkId }],
+        })
+
+        if (existingLogs === 0) {
+          const logsToCreate = []
+
+          // Account creation log
+          if (user.createdAt) {
+            logsToCreate.push({
+              userEmail: user.userEmail,
+              userId: userIdToQuery,
+              clerkId: user.clerkId,
+              userName: user.userName,
+              type: "account_created",
+              description: "Account created",
+              amount: 0,
+              currency: "AUD",
+              status: "completed",
+              date: user.createdAt,
+              createdAt: new Date(),
+              metadata: {
+                ...userInfo,
+                seeded: true,
+              },
+            })
+          }
+
+          // Subscription purchase if subscribed
+          if (user.isSubscribed) {
+            logsToCreate.push({
+              userEmail: user.userEmail,
+              userId: userIdToQuery,
+              clerkId: user.clerkId,
+              userName: user.userName,
+              type: "purchase",
+              description: "Best Mate Premium Subscription",
+              amount: 29.99,
+              currency: "AUD",
+              status: "completed",
+              date: user.createdAt || new Date(),
+              createdAt: new Date(),
+              metadata: {
+                ...userInfo,
+                seeded: true,
+              },
+            })
+          }
+
+          if (logsToCreate.length > 0) {
+            await subscriptionStorage.insertMany(logsToCreate)
+            logsCreated += logsToCreate.length
+          }
+        }
+      }
+
+      res.json({
+        success: true,
+        message: `Seeded ${logsCreated} purchase logs for existing users`,
+        logsCreated: logsCreated,
+      })
+    } catch (error) {
+      console.error("Error seeding purchase logs:", error)
+      res.status(500).json({ error: "Failed to seed purchase logs" })
     }
   })
 
