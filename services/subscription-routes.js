@@ -1,4 +1,4 @@
-const express = require("express")
+const express = require('express');
 
 module.exports = (dependencies) => {
   const {
@@ -11,100 +11,100 @@ module.exports = (dependencies) => {
     messagesStorage,
     shedToolsStorage,
     subscriptionStorage,
-  } = dependencies
-  const router = express.Router()
+  } = dependencies;
+  const router = express.Router();
   // Get user subscription details
-  router.get("/api/subscription/:userEmail", async (req, res) => {
+  router.get('/api/subscription/:userEmail', async (req, res) => {
     try {
-      const { userEmail } = req.params
+      const { userEmail } = req.params;
       if (!userEmail) {
-        return res.status(400).json({ error: "User email is required" })
+        return res.status(400).json({ error: 'User email is required' });
       }
-      const user = await usersStorage.findOne({ userEmail })
+      const user = await usersStorage.findOne({ userEmail });
       if (!user) {
-        return res.status(404).json({ error: "User not found" })
+        return res.status(404).json({ error: 'User not found' });
       }
-      let clerkUser = null
+      let clerkUser = null;
       try {
         if (user.clerkId) {
-          clerkUser = await clerkClient.users.getUser(user.clerkId)
+          clerkUser = await clerkClient.users.getUser(user.clerkId);
         }
       } catch (clerkError) {
-        console.warn("Could not fetch Clerk user data:", clerkError.message)
+        console.warn('Could not fetch Clerk user data:', clerkError.message);
       }
       const [totalSessions, totalMessages, toolsInShed] = await Promise.all([
         sessionsStorage
           ? (async () => {
               const sessionQuery = {
                 $or: [{ userEmail: userEmail }, { userEmail: { $in: [userEmail] } }],
-              }
-              console.log("Session query:", JSON.stringify(sessionQuery)) 
-              const count = await sessionsStorage.countDocuments(sessionQuery)
-              console.log("Sessions found:", count) 
-              return count
+              };
+              console.log('Session query:', JSON.stringify(sessionQuery));
+              const count = await sessionsStorage.countDocuments(sessionQuery);
+              console.log('Sessions found:', count);
+              return count;
             })()
           : 0,
         messagesStorage
           ? (async () => {
               const messageQuery = {
                 $or: [{ userEmail: userEmail }, { userEmail: { $in: [userEmail] } }],
-              }
-              const count = await messagesStorage.countDocuments(messageQuery)
-              return count
+              };
+              const count = await messagesStorage.countDocuments(messageQuery);
+              return count;
             })()
           : 0,
         shedToolsStorage
           ? (async () => {
-              const userIdToQuery = user.clerkId || userEmail
+              const userIdToQuery = user.clerkId || userEmail;
               const shedQuery = {
                 user_id: userIdToQuery,
-                collection: { $ne: "shed_analytics" },
-              }
-              const count = await shedToolsStorage.countDocuments(shedQuery)
-              const tools = await shedToolsStorage.find(shedQuery).limit(5).toArray()
+                collection: { $ne: 'shed_analytics' },
+              };
+              const count = await shedToolsStorage.countDocuments(shedQuery);
+              const tools = await shedToolsStorage.find(shedQuery).limit(5).toArray();
               if (count === 0 && user.clerkId) {
                 const emailQuery = {
                   user_id: userEmail,
-                  collection: { $ne: "shed_analytics" },
-                }
-                const emailCount = await shedToolsStorage.countDocuments(emailQuery)
+                  collection: { $ne: 'shed_analytics' },
+                };
+                const emailCount = await shedToolsStorage.countDocuments(emailQuery);
                 if (emailCount > 0) {
-                  return emailCount
+                  return emailCount;
                 }
               }
-              return count
+              return count;
             })()
           : 0,
-      ])
-      let lastActivity = user.updatedAt
+      ]);
+      let lastActivity = user.updatedAt;
       try {
         const lastSession = await sessionsStorage.findOne(
           {
             $or: [{ userEmail: userEmail }, { userEmail: { $in: [userEmail] } }],
           },
-          { sort: { timestamp: -1 } },
-        )
+          { sort: { timestamp: -1 } }
+        );
         if (lastSession && lastSession.timestamp) {
-          lastActivity = lastSession.timestamp
+          lastActivity = lastSession.timestamp;
         }
       } catch (error) {
-        console.warn("Could not fetch last session:", error.message)
+        console.warn('Could not fetch last session:', error.message);
       }
       const subscriptionData = {
         user: {
           id: user._id,
-          userName: user.userName || "Unknown User",
+          userName: user.userName || 'Unknown User',
           userEmail: user.userEmail,
           userImage: user.userImage || null,
           createdAt: user.createdAt || null,
           lastSignInAt: clerkUser?.lastSignInAt || null,
-          role: user.role || "user",
+          role: user.role || 'user',
           isBanned: user.isBanned || false,
         },
         subscription: {
           isActive: user.isSubscribed || false,
-          status: user.isSubscribed ? "active" : "inactive",
-          plan: user.isSubscribed ? "premium" : "free",
+          status: user.isSubscribed ? 'active' : 'inactive',
+          plan: user.isSubscribed ? 'premium' : 'free',
           startDate: user.createdAt || null,
           endDate: null,
           customerId: null,
@@ -116,46 +116,46 @@ module.exports = (dependencies) => {
           toolsInShed,
           lastActivity,
         },
-      }
-      res.json(subscriptionData)
+      };
+      res.json(subscriptionData);
     } catch (error) {
-      res.status(500).json({ error: "Failed to fetch subscription details" })
+      res.status(500).json({ error: 'Failed to fetch subscription details' });
     }
-  })
-  router.get("/api/subscription/:userEmail/purchase-logs", async (req, res) => {
+  });
+  router.get('/api/subscription/:userEmail/purchase-logs', async (req, res) => {
     try {
-      const { userEmail } = req.params
-      const { page = 1, limit = 10 } = req.query
+      const { userEmail } = req.params;
+      const { page = 1, limit = 10 } = req.query;
       if (!userEmail) {
-        return res.status(400).json({ error: "User email is required" })
+        return res.status(400).json({ error: 'User email is required' });
       }
-      const user = await usersStorage.findOne({ userEmail })
+      const user = await usersStorage.findOne({ userEmail });
       if (!user) {
-        return res.status(404).json({ error: "User not found" })
+        return res.status(404).json({ error: 'User not found' });
       }
-      const userIdToQuery = user.clerkId || userEmail
+      const userIdToQuery = user.clerkId || userEmail;
       const purchaseLogsQuery = {
         $or: [{ userEmail: userEmail }, { userId: userIdToQuery }, { clerkId: user.clerkId }],
-      }
-      const totalLogs = await subscriptionStorage.countDocuments(purchaseLogsQuery)
+      };
+      const totalLogs = await subscriptionStorage.countDocuments(purchaseLogsQuery);
       const purchaseLogs = await subscriptionStorage
         .find(purchaseLogsQuery)
         .sort({ date: -1, createdAt: -1, timestamp: -1 })
         .skip((page - 1) * limit)
         .limit(Number.parseInt(limit))
-        .toArray()
+        .toArray();
       const formattedLogs = purchaseLogs.map((log) => ({
         id: log._id.toString(),
-        type: log.type || log.action || "transaction",
-        description: log.description || log.title || "Transaction",
+        type: log.type || log.action || 'transaction',
+        description: log.description || log.title || 'Transaction',
         amount: log.amount || 0,
-        currency: log.currency || "AUD",
-        status: log.status || "completed",
+        currency: log.currency || 'AUD',
+        status: log.status || 'completed',
         date: log.date || log.createdAt || log.timestamp || new Date(),
         reason: log.reason || null,
         feedback: log.feedback || null,
         metadata: log.metadata || {},
-      }))
+      }));
       res.json({
         purchaseLogs: formattedLogs,
         pagination: {
@@ -165,26 +165,26 @@ module.exports = (dependencies) => {
           hasNext: page * limit < totalLogs,
           hasPrev: page > 1,
         },
-      })
+      });
     } catch (error) {
-      console.error("Error fetching purchase logs:", error)
-      res.status(500).json({ error: "Failed to fetch purchase logs" })
+      console.error('Error fetching purchase logs:', error);
+      res.status(500).json({ error: 'Failed to fetch purchase logs' });
     }
-  })
-  router.post("/api/subscription/:userEmail/purchase-logs", async (req, res) => {
+  });
+  router.post('/api/subscription/:userEmail/purchase-logs', async (req, res) => {
     try {
-      const { userEmail } = req.params
-      const { type, description, amount, currency, status, reason, feedback, metadata } = req.body
-      const userInfo = getUserInfoFromRequest(req)
+      const { userEmail } = req.params;
+      const { type, description, amount, currency, status, reason, feedback, metadata } = req.body;
+      const userInfo = getUserInfoFromRequest(req);
       if (!userEmail) {
-        return res.status(400).json({ error: "User email is required" })
+        return res.status(400).json({ error: 'User email is required' });
       }
       if (!type || !description) {
-        return res.status(400).json({ error: "Type and description are required" })
+        return res.status(400).json({ error: 'Type and description are required' });
       }
-      const user = await usersStorage.findOne({ userEmail })
+      const user = await usersStorage.findOne({ userEmail });
       if (!user) {
-        return res.status(404).json({ error: "User not found" })
+        return res.status(404).json({ error: 'User not found' });
       }
       const logEntry = {
         userEmail: userEmail,
@@ -194,8 +194,8 @@ module.exports = (dependencies) => {
         type: type,
         description: description,
         amount: amount || 0,
-        currency: currency || "AUD",
-        status: status || "completed",
+        currency: currency || 'AUD',
+        status: status || 'completed',
         date: new Date(),
         createdAt: new Date(),
         reason: reason || null,
@@ -203,94 +203,94 @@ module.exports = (dependencies) => {
         metadata: {
           ...metadata,
           ...userInfo,
-          addedBy: "system",
+          addedBy: 'system',
         },
+      };
+      const result = await subscriptionStorage.insertOne(logEntry);
+      if (type === 'purchase' && status === 'completed') {
+        await usersStorage.updateOne({ userEmail }, { $set: { isSubscribed: true } });
       }
-
-      const result = await subscriptionStorage.insertOne(logEntry)
-
       // Log audit trail
       await auditLogger.logAudit({
-        action: "CREATE_PURCHASE_LOG",
-        resource: "subscription_log",
+        action: 'CREATE_PURCHASE_LOG',
+        resource: 'subscription_log',
         resourceId: result.insertedId.toString(),
         userId: user._id.toString(),
         userEmail: userEmail,
-        role: user.role || "user",
+        role: user.role || 'user',
         newData: logEntry,
         metadata: {
           logType: type,
           ...userInfo,
         },
-      })
-
+      });
       res.json({
         success: true,
-        message: "Purchase log added successfully",
+        message: 'Purchase log added successfully',
         logId: result.insertedId,
         log: {
           ...logEntry,
           id: result.insertedId.toString(),
         },
-      })
+      });
     } catch (error) {
-      console.error("Error adding purchase log:", error)
-      res.status(500).json({ error: "Failed to add purchase log" })
+      console.error('Error adding purchase log:', error);
+      res.status(500).json({ error: 'Failed to add purchase log' });
     }
-  })
-  router.post("/api/subscription/:userEmail/cancel", async (req, res) => {
+  });
+  router.post('/api/subscription/:userEmail/cancel', async (req, res) => {
     try {
-      const { userEmail } = req.params
-      const { reason, feedback } = req.body
-      const userInfo = getUserInfoFromRequest(req)
+      const { userEmail } = req.params;
+      const { reason, feedback } = req.body;
+      const userInfo = getUserInfoFromRequest(req);
       if (!userEmail) {
-        return res.status(400).json({ error: "User email is required" })
+        return res.status(400).json({ error: 'User email is required' });
       }
-      const user = await usersStorage.findOne({ userEmail })
+      const user = await usersStorage.findOne({ userEmail });
       if (!user) {
-        return res.status(404).json({ error: "User not found" })
+        return res.status(404).json({ error: 'User not found' });
       }
       if (!user.isSubscribed) {
-        return res.status(400).json({ error: "No active subscription to cancel" })
+        return res.status(400).json({ error: 'No active subscription to cancel' });
       }
       // Update user subscription status
       const updateData = {
         isSubscribed: false,
         subscriptionCancelledAt: new Date(),
-        subscriptionCancelReason: reason || "User requested cancellation",
+        subscriptionCancelReason: reason || 'User requested cancellation',
         subscriptionCancelFeedback: feedback || null,
         updatedAt: new Date(),
-      }
-      await usersStorage.updateOne({ userEmail }, { $set: updateData })
+      };
+      await usersStorage.updateOne({ userEmail }, { $set: updateData });
       // Add cancellation log to subscriptionStorage
       const cancellationLog = {
         userEmail: userEmail,
         userId: user.clerkId || userEmail,
         clerkId: user.clerkId,
         userName: user.userName,
-        type: "cancellation",
-        description: "Subscription cancelled",
+        type: 'cancellation',
+        description: 'Subscription cancelled',
         amount: 0,
-        currency: "AUD",
-        status: "completed",
+        currency: 'AUD',
+        status: 'completed',
         date: new Date(),
         createdAt: new Date(),
-        reason: reason || "User requested cancellation",
+        reason: reason || 'User requested cancellation',
         feedback: feedback || null,
         metadata: {
           ...userInfo,
-          previousPlan: user.isSubscribed ? "premium" : "free",
+          previousPlan: user.isSubscribed ? 'premium' : 'free',
         },
-      }
-      await subscriptionStorage.insertOne(cancellationLog)
+      };
+      await subscriptionStorage.insertOne(cancellationLog);
       // Log audit trail
       await auditLogger.logAudit({
-        action: "CANCEL_SUBSCRIPTION",
-        resource: "subscription",
+        action: 'CANCEL_SUBSCRIPTION',
+        resource: 'subscription',
         resourceId: user._id.toString(),
         userId: user._id.toString(),
         userEmail: userEmail,
-        role: user.role || "user",
+        role: user.role || 'user',
         oldData: {
           isSubscribed: user.isSubscribed,
         },
@@ -300,92 +300,92 @@ module.exports = (dependencies) => {
           feedback: feedback,
           ...userInfo,
         },
-      })
+      });
       res.json({
         success: true,
-        message: "Subscription cancelled successfully",
+        message: 'Subscription cancelled successfully',
         cancellationDate: new Date(),
         refundEligible: false,
-      })
+      });
     } catch (error) {
-      console.error("Error cancelling subscription:", error)
-      res.status(500).json({ error: "Failed to cancel subscription" })
+      console.error('Error cancelling subscription:', error);
+      res.status(500).json({ error: 'Failed to cancel subscription' });
     }
-  })
-  router.post("/api/subscription/:userEmail/reactivate", async (req, res) => {
+  });
+  router.post('/api/subscription/:userEmail/reactivate', async (req, res) => {
     try {
-      const { userEmail } = req.params
-      const userInfo = getUserInfoFromRequest(req)
+      const { userEmail } = req.params;
+      const userInfo = getUserInfoFromRequest(req);
       if (!userEmail) {
-        return res.status(400).json({ error: "User email is required" })
+        return res.status(400).json({ error: 'User email is required' });
       }
-      const user = await usersStorage.findOne({ userEmail })
+      const user = await usersStorage.findOne({ userEmail });
       if (!user) {
-        return res.status(404).json({ error: "User not found" })
+        return res.status(404).json({ error: 'User not found' });
       }
 
       if (user.isSubscribed) {
-        return res.status(400).json({ error: "Subscription is already active" })
+        return res.status(400).json({ error: 'Subscription is already active' });
       }
       // Update user subscription status
       const updateData = {
         isSubscribed: true,
         subscriptionReactivatedAt: new Date(),
         updatedAt: new Date(),
-      }
-      await usersStorage.updateOne({ userEmail }, { $set: updateData })
+      };
+      await usersStorage.updateOne({ userEmail }, { $set: updateData });
       const reactivationLog = {
         userEmail: userEmail,
         userId: user.clerkId || userEmail,
         clerkId: user.clerkId,
         userName: user.userName,
-        type: "reactivation",
-        description: "Subscription reactivated",
+        type: 'reactivation',
+        description: 'Subscription reactivated',
         amount: 29.99,
-        currency: "AUD",
-        status: "completed",
+        currency: 'AUD',
+        status: 'completed',
         date: new Date(),
         createdAt: new Date(),
         metadata: {
           ...userInfo,
-          newPlan: "premium",
+          newPlan: 'premium',
         },
-      }
-      await subscriptionStorage.insertOne(reactivationLog)
+      };
+      await subscriptionStorage.insertOne(reactivationLog);
       // Log audit trail
       await auditLogger.logAudit({
-        action: "REACTIVATE_SUBSCRIPTION",
-        resource: "subscription",
+        action: 'REACTIVATE_SUBSCRIPTION',
+        resource: 'subscription',
         resourceId: user._id.toString(),
         userId: user._id.toString(),
         userEmail: userEmail,
-        role: user.role || "user",
+        role: user.role || 'user',
         oldData: {
           isSubscribed: user.isSubscribed,
         },
         newData: updateData,
         metadata: userInfo,
-      })
+      });
 
       res.json({
         success: true,
-        message: "Subscription reactivated successfully",
+        message: 'Subscription reactivated successfully',
         reactivationDate: new Date(),
-      })
+      });
     } catch (error) {
-      console.error("Error reactivating subscription:", error)
-      res.status(500).json({ error: "Failed to reactivate subscription" })
+      console.error('Error reactivating subscription:', error);
+      res.status(500).json({ error: 'Failed to reactivate subscription' });
     }
-  })
-  router.get("/api/subscription/:userEmail/usage-details", async (req, res) => {
+  });
+  router.get('/api/subscription/:userEmail/usage-details', async (req, res) => {
     try {
-      const { userEmail } = req.params
+      const { userEmail } = req.params;
       if (!userEmail) {
-        return res.status(400).json({ error: "User email is required" })
+        return res.status(400).json({ error: 'User email is required' });
       }
-      const user = await usersStorage.findOne({ userEmail })
+      const user = await usersStorage.findOne({ userEmail });
       if (!user) {
-        return res.status(404).json({ error: "User not found" })
+        return res.status(404).json({ error: 'User not found' });
       }
       const [sessionStats, messageStats, shedStats] = await Promise.all([
         sessionsStorage
@@ -400,9 +400,9 @@ module.exports = (dependencies) => {
                   $group: {
                     _id: null,
                     totalSessions: { $sum: 1 },
-                    flaggedSessions: { $sum: { $cond: ["$flagTriggered", 1, 0] } },
-                    budgetTiers: { $push: "$budgetTier" },
-                    lastSession: { $max: "$timestamp" },
+                    flaggedSessions: { $sum: { $cond: ['$flagTriggered', 1, 0] } },
+                    budgetTiers: { $push: '$budgetTier' },
+                    lastSession: { $max: '$timestamp' },
                   },
                 },
               ])
@@ -418,13 +418,13 @@ module.exports = (dependencies) => {
                 },
                 {
                   $project: {
-                    messageCount: { $size: { $ifNull: ["$messages", []] } },
+                    messageCount: { $size: { $ifNull: ['$messages', []] } },
                   },
                 },
                 {
                   $group: {
                     _id: null,
-                    totalMessages: { $sum: "$messageCount" },
+                    totalMessages: { $sum: '$messageCount' },
                     totalConversations: { $sum: 1 },
                   },
                 },
@@ -437,31 +437,31 @@ module.exports = (dependencies) => {
                 {
                   $match: {
                     user_id: user.clerkId || userEmail,
-                    collection: { $ne: "shed_analytics" },
+                    collection: { $ne: 'shed_analytics' },
                   },
                 },
                 {
                   $group: {
-                    _id: "$category",
+                    _id: '$category',
                     count: { $sum: 1 },
-                    tools: { $push: "$tool_name" },
+                    tools: { $push: '$tool_name' },
                   },
                 },
               ])
               .toArray()
           : [],
-      ])
+      ]);
       const sessionData = sessionStats[0] || {
         totalSessions: 0,
         flaggedSessions: 0,
         budgetTiers: [],
         lastSession: null,
-      }
-      const messageData = messageStats[0] || { totalMessages: 0, totalConversations: 0 }
+      };
+      const messageData = messageStats[0] || { totalMessages: 0, totalConversations: 0 };
       const budgetTierCounts = sessionData.budgetTiers.reduce((acc, tier) => {
-        acc[tier] = (acc[tier] || 0) + 1
-        return acc
-      }, {})
+        acc[tier] = (acc[tier] || 0) + 1;
+        return acc;
+      }, {});
 
       res.json({
         sessions: {
@@ -481,16 +481,16 @@ module.exports = (dependencies) => {
         shed: {
           totalTools: shedStats.reduce((sum, category) => sum + category.count, 0),
           categories: shedStats.map((cat) => ({
-            name: cat._id || "Other",
+            name: cat._id || 'Other',
             count: cat.count,
             tools: cat.tools,
           })),
         },
-      })
+      });
     } catch (error) {
-      console.error("Error fetching usage details:", error)
-      res.status(500).json({ error: "Failed to fetch usage details" })
+      console.error('Error fetching usage details:', error);
+      res.status(500).json({ error: 'Failed to fetch usage details' });
     }
-  })
-  return router
-}
+  });
+  return router;
+};
