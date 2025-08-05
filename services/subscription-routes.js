@@ -207,7 +207,7 @@ module.exports = (dependencies) => {
         },
       };
       const result = await subscriptionStorage.insertOne(logEntry);
-      if (type === 'purchase' && status === 'completed') {
+      if (type === 'purchase') {
         await usersStorage.updateOne({ userEmail }, { $set: { isSubscribed: true } });
       }
       // Log audit trail
