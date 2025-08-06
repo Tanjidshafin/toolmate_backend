@@ -1,5 +1,5 @@
 const express = require('express');
-
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 module.exports = (dependencies) => {
   const {
     usersStorage,
@@ -13,6 +13,58 @@ module.exports = (dependencies) => {
     subscriptionStorage,
   } = dependencies;
   const router = express.Router();
+  // Create Stripe Checkout Session
+  router.post('/api/create-checkout-session', async (req, res) => {
+    try {
+      const { userEmail, plan, amount } = req.body;
+      if (!userEmail || !plan || !amount) {
+        return res.status(400).json({ error: 'Missing required fields' });
+      }
+      const user = await usersStorage.findOne({ userEmail });
+      if (!user) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+      const pendingLog = {
+        userEmail: userEmail,
+        userId: user.clerkId || userEmail,
+        clerkId: user.clerkId,
+        userName: user.userName,
+        type: 'pending',
+        description: `${plan} Subscription - Payment Pending`,
+        amount: amount,
+        currency: 'AUD',
+        status: 'pending',
+        date: new Date(),
+        createdAt: new Date(),
+        metadata: {
+          plan: plan,
+          addedBy: 'stripe_checkout',
+        },
+      };
+      await subscriptionStorage.insertOne(pendingLog);
+      const session = await stripe.checkout.sessions.create({
+        payment_method_types: ['card'],
+        line_items: [
+          {
+            price: process.env.STRIPE_PRICE_ID_BEST_MATES,
+            quantity: 1,
+          },
+        ],
+        mode: 'subscription',
+        success_url: `${req.headers.origin}/success?session_id={CHECKOUT_SESSION_ID}&userEmail=${userEmail}&plan=${plan}&amount=${amount}&payment_status=paid`,
+        cancel_url: `${req.headers.origin}/success?session_id={CHECKOUT_SESSION_ID}&userEmail=${userEmail}&plan=${plan}&amount=${amount}&payment_status=cancelled`,
+        customer_email: userEmail,
+        metadata: {
+          userEmail: userEmail,
+          plan: plan,
+          amount: amount.toString(),
+        },
+      });
+      res.json({ sessionId: session.id, url: session.url });
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to create checkout session' });
+    }
+  });
   // Get user subscription details
   router.get('/api/subscription/:userEmail', async (req, res) => {
     try {
@@ -30,7 +82,7 @@ module.exports = (dependencies) => {
           clerkUser = await clerkClient.users.getUser(user.clerkId);
         }
       } catch (clerkError) {
-        console.warn('Could not fetch Clerk user data:', clerkError.message);
+        // Silent error handling
       }
       const [totalSessions, totalMessages, toolsInShed] = await Promise.all([
         sessionsStorage
@@ -38,9 +90,7 @@ module.exports = (dependencies) => {
               const sessionQuery = {
                 $or: [{ userEmail: userEmail }, { userEmail: { $in: [userEmail] } }],
               };
-              console.log('Session query:', JSON.stringify(sessionQuery));
               const count = await sessionsStorage.countDocuments(sessionQuery);
-              console.log('Sessions found:', count);
               return count;
             })()
           : 0,
@@ -88,7 +138,7 @@ module.exports = (dependencies) => {
           lastActivity = lastSession.timestamp;
         }
       } catch (error) {
-        console.warn('Could not fetch last session:', error.message);
+        // Silent error handling
       }
       const subscriptionData = {
         user: {
@@ -122,6 +172,7 @@ module.exports = (dependencies) => {
       res.status(500).json({ error: 'Failed to fetch subscription details' });
     }
   });
+
   router.get('/api/subscription/:userEmail/purchase-logs', async (req, res) => {
     try {
       const { userEmail } = req.params;
@@ -167,10 +218,10 @@ module.exports = (dependencies) => {
         },
       });
     } catch (error) {
-      console.error('Error fetching purchase logs:', error);
       res.status(500).json({ error: 'Failed to fetch purchase logs' });
     }
   });
+
   router.post('/api/subscription/:userEmail/purchase-logs', async (req, res) => {
     try {
       const { userEmail } = req.params;
@@ -234,10 +285,10 @@ module.exports = (dependencies) => {
         },
       });
     } catch (error) {
-      console.error('Error adding purchase log:', error);
       res.status(500).json({ error: 'Failed to add purchase log' });
     }
   });
+
   router.post('/api/subscription/:userEmail/cancel', async (req, res) => {
     try {
       const { userEmail } = req.params;
@@ -308,10 +359,10 @@ module.exports = (dependencies) => {
         refundEligible: false,
       });
     } catch (error) {
-      console.error('Error cancelling subscription:', error);
       res.status(500).json({ error: 'Failed to cancel subscription' });
     }
   });
+
   router.post('/api/subscription/:userEmail/reactivate', async (req, res) => {
     try {
       const { userEmail } = req.params;
@@ -373,10 +424,10 @@ module.exports = (dependencies) => {
         reactivationDate: new Date(),
       });
     } catch (error) {
-      console.error('Error reactivating subscription:', error);
       res.status(500).json({ error: 'Failed to reactivate subscription' });
     }
   });
+
   router.get('/api/subscription/:userEmail/usage-details', async (req, res) => {
     try {
       const { userEmail } = req.params;
@@ -488,9 +539,9 @@ module.exports = (dependencies) => {
         },
       });
     } catch (error) {
-      console.error('Error fetching usage details:', error);
       res.status(500).json({ error: 'Failed to fetch usage details' });
     }
   });
+
   return router;
 };
