@@ -52,7 +52,7 @@ module.exports = (dependencies) => {
         ],
         mode: 'subscription',
         success_url: `${req.headers.origin}/success?session_id={CHECKOUT_SESSION_ID}&userEmail=${userEmail}&plan=${plan}&amount=${amount}&payment_status=paid`,
-        cancel_url: `${req.headers.origin}/success?session_id={CHECKOUT_SESSION_ID}&userEmail=${userEmail}&plan=${plan}&amount=${amount}&payment_status=cancelled`,
+        cancel_url: `${req.headers.origin}/cancel?session_id={CHECKOUT_SESSION_ID}&userEmail=${userEmail}&plan=${plan}&amount=${amount}&payment_status=cancelled`,
         customer_email: userEmail,
         metadata: {
           userEmail: userEmail,
