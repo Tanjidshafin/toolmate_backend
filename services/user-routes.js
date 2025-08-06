@@ -478,7 +478,6 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
         return res.status(400).json({ success: false, message: 'Missing required fields.' });
       }
       await emailTriggers.triggerSystemAlert(userEmail, userName, subject, message);
-
       // Log audit for custom email sent
       await auditLogger.logAudit({
         action: 'SEND_EMAIL',
@@ -504,6 +503,44 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
     } catch (error) {
       console.error('Error sending email:', error);
       res.status(500).json({ success: false, message: 'Failed to send email.' });
+    }
+  });
+  router.post('/email-change-request', async (req, res) => {
+    try {
+      const { presentEmail, updatedEmail } = req.body;
+      if (!presentEmail || !updatedEmail) {
+        return res.status(400).json({ error: 'Both present and updated email are required.' });
+      }
+      const emailBody = `
+G’day ToolMate Legend,
+
+Just a quick heads up — we’ve received your request to change the email linked to your ToolMate account. Too easy!
+
+Here’s what we’ve got on file for you:
+- Old Email: ${presentEmail}
+- New Email: ${updatedEmail}
+
+What’s Next?
+- Sit tight — our team will give this a quick look and approve it shortly.
+- Once approved, you'll be able to log in using your shiny new email.
+- Didn’t make this request? No stress — just flick us a message at contact@toolmate.com.au and we’ll jump on it.
+
+Need a hand with anything else?
+Hit reply or give our support crew a buzz — we’re always here to help.
+
+Catch ya soon,  
+Matey from ToolMate
+    `;
+      await emailTriggers.triggerSystemAlert(
+        process.env.FROM_EMAIL,
+        'Toolmate Owner',
+        'Email Change Requested',
+        emailBody
+      );
+      return res.status(200).json({ message: 'Email change request sent successfully.' });
+    } catch (error) {
+      console.error('Email change request error:', error);
+      return res.status(500).json({ error: 'Internal server error. Please try again later.' });
     }
   });
 
