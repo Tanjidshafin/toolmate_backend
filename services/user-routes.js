@@ -1,5 +1,7 @@
 const express = require('express');
 const { ObjectId } = require('mongodb');
+const multer = require('multer');
+const upload = multer({ storage: multer.memoryStorage() });
 
 module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUserInfoFromRequest }) => {
   const router = express.Router();
@@ -367,23 +369,18 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
       res.status(500).json({ error: 'Failed to update ban status' });
     }
   });
-
   router.delete('/admin/users/:email', async (req, res) => {
     try {
       const userEmail = req.params.email;
       const userInfo = getUserInfoFromRequest(req);
-
-      // Get user data before deletion for audit log
       const existingUser = await usersStorage.findOne({ userEmail });
       if (!existingUser) {
         return res.status(404).json({ message: 'User not found' });
       }
-
       const result = await usersStorage.deleteOne({ userEmail });
       if (result.deletedCount === 0) {
         return res.status(404).json({ message: 'User not found' });
       }
-
       // Log audit for user deletion
       await auditLogger.logAudit({
         action: 'DELETE',
@@ -399,17 +396,17 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
         },
         ...userInfo,
       });
-
       res.json({ message: 'User deleted successfully' });
     } catch (error) {
       console.error('Error deleting user:', error);
       res.status(500).json({ message: 'Internal server error' });
     }
   });
-  router.put('/api/user/profile/:userEmail', async (req, res) => {
+  router.put('/api/user/profile/:userEmail', upload.single('userImage'), async (req, res) => {
     try {
       const { userEmail } = req.params;
-      const { userName, userImage } = req.body;
+      const { userName } = req.body;
+      const uploadedFile = req.file;
       const userInfo = getUserInfoFromRequest(req);
       if (!userEmail) {
         return res.status(400).json({ error: 'User email is required' });
@@ -421,30 +418,40 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
       const updateData = {
         updatedAt: new Date(),
       };
-      if (userName !== undefined) updateData.userName = userName;
-      if (userImage !== undefined) updateData.userImage = userImage;
-      if (user.clerkId) {
+      let newImageUrl = null;
+      if (uploadedFile && user.clerkId) {
+        try {
+          const fileBlob = new Blob([uploadedFile.buffer], { type: uploadedFile.mimetype });
+          const updatedUser = await clerkClient.users.updateUserProfileImage(user.clerkId, {
+            file: fileBlob,
+          });
+          newImageUrl = updatedUser.imageUrl;
+          updateData.userImage = newImageUrl;
+          console.log('Successfully updated user profile image in Clerk');
+        } catch (clerkImageError) {
+          console.error('Error updating user profile image in Clerk:', clerkImageError);
+          return res.status(500).json({ error: 'Failed to update profile image' });
+        }
+      }
+      if (userName !== undefined) {
+        updateData.userName = userName;
+      }
+      if (user.clerkId && userName !== undefined) {
         const clerkUpdates = {};
-        if (userName !== undefined) {
-          const nameParts = userName.split(' ');
-          clerkUpdates.firstName = nameParts[0] || userName;
-          clerkUpdates.lastName = nameParts.slice(1).join(' ') || '';
-        }
-        if (userImage !== undefined) {
-          clerkUpdates.imageUrl = userImage;
-        }
-        if (Object.keys(clerkUpdates).length > 0) {
-          try {
-            await clerkClient.users.updateUser(user.clerkId, clerkUpdates);
-          } catch (clerkError) {
-            console.error('Error updating user in Clerk:', clerkError);
-          }
+        const nameParts = userName.split(' ');
+        clerkUpdates.firstName = nameParts[0] || userName;
+        clerkUpdates.lastName = nameParts.slice(1).join(' ') || '';
+        try {
+          await clerkClient.users.updateUser(user.clerkId, clerkUpdates);
+        } catch (clerkNameError) {
+          console.error('Error updating user name in Clerk:', clerkNameError);
         }
       }
       const result = await usersStorage.updateOne({ userEmail }, { $set: updateData });
       if (result.matchedCount === 0) {
         return res.status(404).json({ error: 'User not found in database' });
       }
+      // Log audit
       await auditLogger.logAudit({
         action: 'UPDATE_PROFILE',
         resource: 'user',
@@ -457,12 +464,14 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
         metadata: {
           updatedFields: Object.keys(updateData),
           source: 'user_profile_page',
+          imageUpdated: !!uploadedFile,
         },
         ...userInfo,
       });
       res.json({
         message: 'Profile updated successfully',
         updatedFields: Object.keys(updateData),
+        imageUrl: newImageUrl,
       });
     } catch (error) {
       console.error('Error updating user profile:', error);
@@ -473,7 +482,6 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
     try {
       const { userName, userEmail, message, subject } = req.body;
       const userInfo = getUserInfoFromRequest(req);
-
       if (!userName || !userEmail || !message || !subject) {
         return res.status(400).json({ success: false, message: 'Missing required fields.' });
       }
