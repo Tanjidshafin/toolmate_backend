@@ -141,7 +141,7 @@ module.exports = (dependencies) => {
       const subscriptionData = {
         user: {
           id: user._id,
-          userName: user.userName || 'Unknown User',
+          userName: user.userName || 'Best Mates Subscription User',
           userEmail: user.userEmail,
           userImage: user.userImage || null,
           createdAt: user.createdAt || null,
@@ -787,7 +787,7 @@ module.exports = (dependencies) => {
           ]);
           return {
             id: user._id,
-            userName: user.userName || 'Unknown',
+            userName: user.userName || 'Best Mates Subscription',
             userEmail: user.userEmail,
             userImage: user.userImage,
             isSubscribed: user.isSubscribed || false,
@@ -988,7 +988,7 @@ module.exports = (dependencies) => {
         },
         timeBreakdown: formatBreakdownData(revenueData),
         subscriptionTypes: subscriptionTypes.map((type) => ({
-          plan: type._id || 'Unknown',
+          plan: type._id || 'Best Mates Subscription',
           count: type.count,
           revenue: type.revenue,
           percentage: totalRevenue > 0 ? ((type.revenue / totalRevenue) * 100).toFixed(2) : 0,
