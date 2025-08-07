@@ -427,7 +427,6 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
           });
           newImageUrl = updatedUser.imageUrl;
           updateData.userImage = newImageUrl;
-          console.log('Successfully updated user profile image in Clerk');
         } catch (clerkImageError) {
           console.error('Error updating user profile image in Clerk:', clerkImageError);
           return res.status(500).json({ error: 'Failed to update profile image' });
