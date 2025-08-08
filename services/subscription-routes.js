@@ -1,5 +1,6 @@
 const express = require('express');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const { format, differenceInMonths, startOfMonth, endOfMonth, addMonths } = require('date-fns');
 module.exports = (dependencies) => {
   const {
     usersStorage,
@@ -13,6 +14,61 @@ module.exports = (dependencies) => {
     subscriptionStorage,
   } = dependencies;
   const router = express.Router();
+  const getDateFilters = (period, startDate, endDate) => {
+    let dateFilter = {};
+    let previousPeriodFilter = {};
+    const now = new Date();
+    if (startDate && endDate) {
+      const start = new Date(startDate);
+      const end = new Date(endDate);
+      dateFilter = { createdAt: { $gte: start, $lte: end } };
+      const diffTime = Math.abs(end.getTime() - start.getTime());
+      const prevStart = new Date(start.getTime() - diffTime - (24 * 60 * 60 * 1000)); 
+      const prevEnd = new Date(start.getTime() - (24 * 60 * 60 * 1000));
+      previousPeriodFilter = { createdAt: { $gte: prevStart, $lte: prevEnd } };
+    } else {
+      switch (period) {
+        case '24h':
+          dateFilter = { createdAt: { $gte: new Date(now.getTime() - 24 * 60 * 60 * 1000) } };
+          previousPeriodFilter = {
+            createdAt: {
+              $gte: new Date(now.getTime() - 48 * 60 * 60 * 1000),
+              $lt: new Date(now.getTime() - 24 * 60 * 60 * 1000),
+            },
+          };
+          break;
+        case '7d':
+          dateFilter = { createdAt: { $gte: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000) } };
+          previousPeriodFilter = {
+            createdAt: {
+              $gte: new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000),
+              $lt: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000),
+            },
+          };
+          break;
+        case '30d':
+          dateFilter = { createdAt: { $gte: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000) } };
+          previousPeriodFilter = {
+            createdAt: {
+              $gte: new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000),
+              $lt: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000),
+            },
+          };
+          break;
+        case '90d':
+          dateFilter = { createdAt: { $gte: new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000) } };
+          break;
+        case '1y':
+          dateFilter = { createdAt: { $gte: new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000) } };
+          break;
+        case 'all':
+        default:
+          dateFilter = {};
+          break;
+      }
+    }
+    return { dateFilter, previousPeriodFilter };
+  };
   // Create Stripe Checkout Session
   router.post('/api/create-checkout-session', async (req, res) => {
     try {
@@ -543,30 +599,10 @@ module.exports = (dependencies) => {
   router.get('/api/admin/analytics/subscriptions', async (req, res) => {
     try {
       const userInfo = getUserInfoFromRequest(req);
-      const { period = '30d' } = req.query;
-      let dateFilter = {};
+      const { period = '30d', startDate, endDate } = req.query;
+      const { dateFilter, previousPeriodFilter } = getDateFilters(period, startDate, endDate);
       const now = new Date();
-      switch (period) {
-        case '24h':
-          dateFilter = { createdAt: { $gte: new Date(now.getTime() - 24 * 60 * 60 * 1000) } };
-          break;
-        case '7d':
-          dateFilter = { createdAt: { $gte: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000) } };
-          break;
-        case '30d':
-          dateFilter = { createdAt: { $gte: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000) } };
-          break;
-        case '90d':
-          dateFilter = { createdAt: { $gte: new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000) } };
-          break;
-        case '1y':
-          dateFilter = { createdAt: { $gte: new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000) } };
-          break;
-        case 'all':
-        default:
-          dateFilter = {};
-          break;
-      }
+
       const [
         totalUsers,
         activeSubscriptions,
@@ -617,36 +653,20 @@ module.exports = (dependencies) => {
       const totalRevenueAmount = totalRevenue[0]?.total || 0;
       const periodRevenueAmount = revenueInPeriod[0]?.total || 0;
       const conversionRate = totalUsers > 0 ? ((activeSubscriptions / totalUsers) * 100).toFixed(2) : 0;
-      let previousPeriodFilter = {};
-      switch (period) {
-        case '24h':
-          previousPeriodFilter = {
-            createdAt: {
-              $gte: new Date(now.getTime() - 48 * 60 * 60 * 1000),
-              $lt: new Date(now.getTime() - 24 * 60 * 60 * 1000),
-            },
-          };
-          break;
-        case '7d':
-          previousPeriodFilter = {
-            createdAt: {
-              $gte: new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000),
-              $lt: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000),
-            },
-          };
-          break;
-        case '30d':
-          previousPeriodFilter = {
-            createdAt: {
-              $gte: new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000),
-              $lt: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000),
-            },
-          };
-          break;
-      }
+
       let growthMetrics = {};
+      let historicalConversionRate = [];
+      let historicalUserGrowth = [];
+
       if (period !== 'all' && period !== '90d' && period !== '1y') {
-        const [previousUsers, previousRevenue, previousSubscriptions] = await Promise.all([
+        const [
+          previousUsers,
+          previousRevenue,
+          previousSubscriptions,
+          previousCancellations,
+          previousNetSubscriptionChange,
+          historicalData,
+        ] = await Promise.all([
           usersStorage.countDocuments(previousPeriodFilter),
           subscriptionStorage
             .aggregate([
@@ -665,20 +685,98 @@ module.exports = (dependencies) => {
             status: 'completed',
             ...previousPeriodFilter,
           }),
+          subscriptionStorage.countDocuments({
+            type: 'cancellation',
+            ...previousPeriodFilter,
+          }),
+          (async () => {
+            const prevNewSubs = await subscriptionStorage.countDocuments({
+              type: { $in: ['purchase', 'reactivation'] },
+              status: 'completed',
+              ...previousPeriodFilter,
+            });
+            const prevCancellations = await subscriptionStorage.countDocuments({
+              type: 'cancellation',
+              ...previousPeriodFilter,
+            });
+            return prevNewSubs - prevCancellations;
+          })(),
+          subscriptionStorage
+            .aggregate([
+              {
+                $match: {
+                  createdAt: {
+                    $gte: new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000), // Last 60 days for sparklines
+                    $lte: now,
+                  },
+                },
+              },
+              {
+                $group: {
+                  _id: {
+                    year: { $year: '$createdAt' },
+                    month: { $month: '$createdAt' },
+                    day: { $dayOfMonth: '$createdAt' },
+                  },
+                  newUsers: { $sum: { $cond: [{ $eq: ['$type', 'user_signup'] }, 1, 0] } },
+                  activeSubscriptions: { $sum: { $cond: [{ $eq: ['$type', 'purchase'] }, 1, 0] } },
+                  totalUsers: { $sum: 1 }, // This needs to be total users at that point, not just activity
+                },
+              },
+              {
+                $sort: { '_id.year': 1, '_id.month': 1, '_id.day': 1 },
+              },
+            ])
+            .toArray(),
         ]);
+
         const prevRevenueAmount = previousRevenue[0]?.total || 0;
+        const prevConversionRate = previousUsers > 0 ? ((previousSubscriptions / previousUsers) * 100).toFixed(2) : 0;
+
         growthMetrics = {
           userGrowth: previousUsers > 0 ? (((newUsersInPeriod - previousUsers) / previousUsers) * 100).toFixed(2) : 0,
           revenueGrowth:
-            prevRevenueAmount > 0
-              ? (((periodRevenueAmount - prevRevenueAmount) / prevRevenueAmount) * 100).toFixed(2)
-              : 0,
+            prevRevenueAmount > 0 ? (((periodRevenueAmount - prevRevenueAmount) / prevRevenueAmount) * 100).toFixed(2) : 0,
           subscriptionGrowth:
             previousSubscriptions > 0
               ? (((newSubscriptionsInPeriod - previousSubscriptions) / previousSubscriptions) * 100).toFixed(2)
               : 0,
+          conversionRateGrowth:
+            prevConversionRate > 0 ? (((parseFloat(conversionRate) - parseFloat(prevConversionRate)) / parseFloat(prevConversionRate)) * 100).toFixed(2) : 0,
+          newSubscriptionsGrowth:
+            previousSubscriptions > 0
+              ? (((newSubscriptionsInPeriod - previousSubscriptions) / previousSubscriptions) * 100).toFixed(2)
+              : 0,
+          netSubscriptionChangeGrowth:
+            previousNetSubscriptionChange !== 0
+              ? (((newSubscriptionsInPeriod + reactivationsInPeriod - cancellationsInPeriod - previousNetSubscriptionChange) / previousNetSubscriptionChange) * 100).toFixed(2)
+              : 0,
+          cancellationsGrowth:
+            previousCancellations > 0
+              ? (((cancellationsInPeriod - previousCancellations) / previousCancellations) * 100).toFixed(2)
+              : 0,
         };
+
+        // Process historical data for sparklines
+        let runningTotalUsers = 0;
+        let runningActiveSubs = 0;
+        historicalConversionRate = historicalData.map(item => {
+          // This is a simplified way to get total users and active subs for historical conversion rate
+          // A more accurate way would involve querying user states at each specific date.
+          runningTotalUsers += item.newUsers; // Assuming 'newUsers' here represents total users for simplicity
+          runningActiveSubs += item.activeSubscriptions;
+          return {
+            date: `${item._id.year}-${String(item._id.month).padStart(2, '0')}-${String(item._id.day).padStart(2, '0')}`,
+            conversionRate: runningTotalUsers > 0 ? (runningActiveSubs / runningTotalUsers) * 100 : 0,
+          };
+        });
+
+        historicalUserGrowth = historicalData.map(item => ({
+          date: `${item._id.year}-${String(item._id.month).padStart(2, '0')}-${String(item._id.day).padStart(2, '0')}`,
+          newUsers: item.newUsers,
+        }));
       }
+
       res.json({
         period,
         overview: {
@@ -706,6 +804,8 @@ module.exports = (dependencies) => {
           status: activity.status,
           date: activity.createdAt,
         })),
+        historicalConversionRate,
+        historicalUserGrowth,
       });
     } catch (error) {
       res.status(500).json({ error: 'Failed to fetch analytics' });
@@ -827,30 +927,8 @@ module.exports = (dependencies) => {
   router.get('/api/admin/analytics/revenue', async (req, res) => {
     try {
       const userInfo = getUserInfoFromRequest(req);
-      const { period = '30d', breakdown = 'daily' } = req.query;
-      let dateFilter = {};
-      const now = new Date();
-      switch (period) {
-        case '24h':
-          dateFilter = { createdAt: { $gte: new Date(now.getTime() - 24 * 60 * 60 * 1000) } };
-          break;
-        case '7d':
-          dateFilter = { createdAt: { $gte: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000) } };
-          break;
-        case '30d':
-          dateFilter = { createdAt: { $gte: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000) } };
-          break;
-        case '90d':
-          dateFilter = { createdAt: { $gte: new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000) } };
-          break;
-        case '1y':
-          dateFilter = { createdAt: { $gte: new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000) } };
-          break;
-        case 'all':
-        default:
-          dateFilter = {};
-          break;
-      }
+      const { period = '30d', breakdown = 'daily', startDate, endDate } = req.query;
+      const { dateFilter } = getDateFilters(period, startDate, endDate);
       let groupBy = {};
       if (period === '24h') {
         groupBy = {
@@ -1123,6 +1201,180 @@ module.exports = (dependencies) => {
       });
     } catch (error) {
       res.status(500).json({ error: 'Failed to fetch activity analytics' });
+    }
+  });
+  router.get('/api/admin/analytics/mrr-arr', async (req, res) => {
+    try {
+      const { period = '30d', startDate, endDate } = req.query;
+      const { dateFilter } = getDateFilters(period, startDate, endDate);
+      const now = new Date();
+      const activeSubscriptions = await usersStorage.find({ isSubscribed: true }).toArray();
+      let mrr = 0;
+      for (const user of activeSubscriptions) {
+        const latestPurchase = await subscriptionStorage.findOne(
+          {
+            userEmail: user.userEmail,
+            type: 'purchase',
+            status: 'completed',
+            createdAt: { $lte: now },
+          },
+          { sort: { createdAt: -1 } }
+        );
+        if (latestPurchase && latestPurchase.amount) {
+          mrr += latestPurchase.amount;
+        }
+      }
+      const arr = mrr * 12; 
+      res.json({
+        period,
+        mrr,
+        arr,
+      });
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to fetch MRR and ARR' });
+    }
+  });
+  router.get('/api/admin/analytics/churn-rate', async (req, res) => {
+    try {
+      const { period = '30d', startDate, endDate } = req.query;
+      const { dateFilter } = getDateFilters(period, startDate, endDate);
+      const [cancellationsInPeriod, activeSubscriptions] = await Promise.all([
+        subscriptionStorage.countDocuments({
+          type: 'cancellation',
+          ...dateFilter,
+        }),
+        usersStorage.countDocuments({ isSubscribed: true }),
+      ]);
+      const churnRate =
+        activeSubscriptions + cancellationsInPeriod > 0
+          ? (cancellationsInPeriod / (activeSubscriptions + cancellationsInPeriod)) * 100
+          : 0;
+      res.json({
+        period,
+        churnRate: parseFloat(churnRate.toFixed(2)),
+        cancellations: cancellationsInPeriod,
+      });
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to fetch churn rate' });
+    }
+  });
+  router.get('/api/admin/analytics/ltv-arpu', async (req, res) => {
+    try {
+      const { period = '30d', startDate, endDate } = req.query;
+      const { dateFilter } = getDateFilters(period, startDate, endDate);
+      const [totalRevenueResult, totalUniqueUsers, churnRateData] = await Promise.all([
+        subscriptionStorage
+          .aggregate([
+            { $match: { type: 'purchase', status: 'completed', ...dateFilter } },
+            { $group: { _id: null, total: { $sum: '$amount' }, uniqueUsers: { $addToSet: '$userEmail' } } },
+          ])
+          .toArray(),
+        usersStorage.countDocuments({}),
+        subscriptionStorage.countDocuments({ type: 'cancellation', ...dateFilter }),
+      ]);
+      const totalRevenue = totalRevenueResult[0]?.total || 0;
+      const uniquePayingUsersInPeriod = totalRevenueResult[0]?.uniqueUsers?.length || 0;
+      const totalUsers = totalUniqueUsers;
+      const arpu = totalUsers > 0 ? totalRevenue / totalUsers : 0;
+      const activeSubscriptions = await usersStorage.countDocuments({ isSubscribed: true });
+      const churnRate =
+        activeSubscriptions + churnRateData > 0
+          ? (churnRateData / (activeSubscriptions + churnRateData))
+          : 0; 
+      const ltv = churnRate > 0 ? arpu / churnRate : 0;
+      res.json({
+        period,
+        arpu: parseFloat(arpu.toFixed(2)),
+        ltv: parseFloat(ltv.toFixed(2)),
+      });
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to fetch LTV and ARPU' });
+    }
+  });
+  router.get('/api/admin/analytics/billing-issues', async (req, res) => {
+    try {
+      const { period = '30d', startDate, endDate } = req.query;
+      const { dateFilter } = getDateFilters(period, startDate, endDate);
+      const [totalTransactions, refunds, failedPayments] = await Promise.all([
+        subscriptionStorage.countDocuments({ type: 'purchase', status: 'completed', ...dateFilter }),
+        subscriptionStorage
+          .aggregate([
+            { $match: { type: 'refund', ...dateFilter } },
+            { $group: { _id: null, count: { $sum: 1 }, totalAmount: { $sum: '$amount' } } },
+          ])
+          .toArray(),
+        subscriptionStorage
+          .aggregate([
+            { $match: { status: 'failed', ...dateFilter } },
+            { $group: { _id: null, count: { $sum: 1 }, totalAmount: { $sum: '$amount' } } },
+          ])
+          .toArray(),
+      ]);
+      const refundsCount = refunds[0]?.count || 0;
+      const refundsValue = refunds[0]?.totalAmount || 0;
+      const failedPaymentsCount = failedPayments[0]?.count || 0;
+      const failedPaymentsValue = failedPayments[0]?.totalAmount || 0;
+      const refundRate = totalTransactions > 0 ? (refundsCount / totalTransactions) * 100 : 0;
+      res.json({
+        period,
+        refundRate: parseFloat(refundRate.toFixed(2)),
+        refundsCount,
+        refundsValue,
+        failedPaymentsCount,
+        failedPaymentsValue,
+      });
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to fetch billing issues' });
+    }
+  });
+  router.get('/api/admin/analytics/cohort-retention', async (req, res) => {
+    try {
+      const { period = '30d', startDate, endDate } = req.query;
+      const { dateFilter } = getDateFilters(period, startDate, endDate);
+      const allUsersInPeriod = await usersStorage.find(dateFilter).toArray();
+      const cohortsMap = new Map(); 
+      for (const user of allUsersInPeriod) {
+        const signupDate = user.createdAt;
+        if (signupDate) {
+          const cohortMonth = format(signupDate, 'yyyy-MM');
+          if (!cohortsMap.has(cohortMonth)) {
+            cohortsMap.set(cohortMonth, { users: [], count: 0 });
+          }
+          cohortsMap.get(cohortMonth).users.push(user);
+          cohortsMap.get(cohortMonth).count++;
+        }
+      }
+      const sortedCohorts = Array.from(cohortsMap.keys()).sort();
+      const retentionData = [];
+      const startPeriod = startDate ? new Date(startDate) : new Date(new Date().getTime() - 30 * 24 * 60 * 60 * 1000);
+      const endPeriod = endDate ? new Date(endDate) : new Date();
+      const totalMonthsToTrack = differenceInMonths(endPeriod, startPeriod) + 1;
+      for (const cohortMonth of sortedCohorts) {
+        const cohortUsers = cohortsMap.get(cohortMonth).users;
+        const initialCohortSize = cohortsMap.get(cohortMonth).count;
+        if (initialCohortSize === 0) continue;
+        const cohortRow = { month: cohortMonth, initial: initialCohortSize };
+        for (let i = 0; i < totalMonthsToTrack; i++) {
+          const targetMonth = addMonths(new Date(cohortMonth), i);
+          const targetMonthStart = startOfMonth(targetMonth);
+          const targetMonthEnd = endOfMonth(targetMonth);
+          const activeInMonthCount = await usersStorage.countDocuments({
+            _id: { $in: cohortUsers.map(u => u._id) },
+            isSubscribed: true,
+            createdAt: { $lte: targetMonthEnd },
+            $or: [
+              { subscriptionCancelledAt: { $gte: targetMonthStart } },
+              { subscriptionCancelledAt: { $exists: false } },
+            ],
+          });
+          const retentionPercentage = (activeInMonthCount / initialCohortSize) * 100;
+          cohortRow[`month${i}`] = parseFloat(retentionPercentage.toFixed(2));
+        }
+        retentionData.push(cohortRow);
+      }
+      res.json(retentionData);
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to fetch cohort retention data' });
     }
   });
   return router;
