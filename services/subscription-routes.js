@@ -1116,7 +1116,6 @@ module.exports = (dependencies) => {
       let dateFilter = {};
       const now = new Date();
       const currentTime = now.getTime();
-
       switch (period) {
         case '24h':
         case 'hourly':
@@ -1167,7 +1166,6 @@ module.exports = (dependencies) => {
               ])
               .toArray()
           : [],
-        // Message activty
         messagesStorage
           ? messagesStorage
               .aggregate([
