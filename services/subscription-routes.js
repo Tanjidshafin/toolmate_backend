@@ -18,55 +18,88 @@ module.exports = (dependencies) => {
     let dateFilter = {};
     let previousPeriodFilter = {};
     const now = new Date();
+    
     if (startDate && endDate) {
       const start = new Date(startDate);
       const end = new Date(endDate);
+      
+      // Validate dates
+      if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+        throw new Error('Invalid date range provided');
+      }
+      
       dateFilter = { createdAt: { $gte: start, $lte: end } };
       const diffTime = Math.abs(end.getTime() - start.getTime());
       const prevStart = new Date(start.getTime() - diffTime - (24 * 60 * 60 * 1000)); 
       const prevEnd = new Date(start.getTime() - (24 * 60 * 60 * 1000));
       previousPeriodFilter = { createdAt: { $gte: prevStart, $lte: prevEnd } };
     } else {
+      // Ensure we're working with a valid date
+      const currentTime = now.getTime();
+      
       switch (period) {
         case '24h':
-          dateFilter = { createdAt: { $gte: new Date(now.getTime() - 24 * 60 * 60 * 1000) } };
+        case 'hourly':
+          const hours24Ago = new Date(currentTime - 24 * 60 * 60 * 1000);
+          dateFilter = { createdAt: { $gte: hours24Ago } };
           previousPeriodFilter = {
             createdAt: {
-              $gte: new Date(now.getTime() - 48 * 60 * 60 * 1000),
-              $lt: new Date(now.getTime() - 24 * 60 * 60 * 1000),
+              $gte: new Date(currentTime - 48 * 60 * 60 * 1000),
+              $lt: hours24Ago,
             },
           };
           break;
         case '7d':
-          dateFilter = { createdAt: { $gte: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000) } };
+        case 'daily':
+          const days7Ago = new Date(currentTime - 7 * 24 * 60 * 60 * 1000);
+          dateFilter = { createdAt: { $gte: days7Ago } };
           previousPeriodFilter = {
             createdAt: {
-              $gte: new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000),
-              $lt: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000),
+              $gte: new Date(currentTime - 14 * 24 * 60 * 60 * 1000),
+              $lt: days7Ago,
             },
           };
           break;
         case '30d':
-          dateFilter = { createdAt: { $gte: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000) } };
+        case 'monthly':
+          const days30Ago = new Date(currentTime - 30 * 24 * 60 * 60 * 1000);
+          dateFilter = { createdAt: { $gte: days30Ago } };
           previousPeriodFilter = {
             createdAt: {
-              $gte: new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000),
-              $lt: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000),
+              $gte: new Date(currentTime - 60 * 24 * 60 * 60 * 1000),
+              $lt: days30Ago,
             },
           };
           break;
         case '90d':
-          dateFilter = { createdAt: { $gte: new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000) } };
+          const days90Ago = new Date(currentTime - 90 * 24 * 60 * 60 * 1000);
+          dateFilter = { createdAt: { $gte: days90Ago } };
+          previousPeriodFilter = {
+            createdAt: {
+              $gte: new Date(currentTime - 180 * 24 * 60 * 60 * 1000),
+              $lt: days90Ago,
+            },
+          };
           break;
         case '1y':
-          dateFilter = { createdAt: { $gte: new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000) } };
+        case 'yearly':
+          const days365Ago = new Date(currentTime - 365 * 24 * 60 * 60 * 1000);
+          dateFilter = { createdAt: { $gte: days365Ago } };
+          previousPeriodFilter = {
+            createdAt: {
+              $gte: new Date(currentTime - 730 * 24 * 60 * 60 * 1000),
+              $lt: days365Ago,
+            },
+          };
           break;
         case 'all':
         default:
           dateFilter = {};
+          previousPeriodFilter = {};
           break;
       }
     }
+    
     return { dateFilter, previousPeriodFilter };
   };
   // Create Stripe Checkout Session
@@ -706,7 +739,7 @@ module.exports = (dependencies) => {
               {
                 $match: {
                   createdAt: {
-                    $gte: new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000), // Last 60 days for sparklines
+                    $gte: new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000), 
                     $lte: now,
                   },
                 },
@@ -720,7 +753,7 @@ module.exports = (dependencies) => {
                   },
                   newUsers: { $sum: { $cond: [{ $eq: ['$type', 'user_signup'] }, 1, 0] } },
                   activeSubscriptions: { $sum: { $cond: [{ $eq: ['$type', 'purchase'] }, 1, 0] } },
-                  totalUsers: { $sum: 1 }, // This needs to be total users at that point, not just activity
+                  totalUsers: { $sum: 1 },
                 },
               },
               {
@@ -756,27 +789,21 @@ module.exports = (dependencies) => {
               ? (((cancellationsInPeriod - previousCancellations) / previousCancellations) * 100).toFixed(2)
               : 0,
         };
-
-        // Process historical data for sparklines
         let runningTotalUsers = 0;
         let runningActiveSubs = 0;
         historicalConversionRate = historicalData.map(item => {
-          // This is a simplified way to get total users and active subs for historical conversion rate
-          // A more accurate way would involve querying user states at each specific date.
-          runningTotalUsers += item.newUsers; // Assuming 'newUsers' here represents total users for simplicity
+          runningTotalUsers += item.newUsers; 
           runningActiveSubs += item.activeSubscriptions;
           return {
             date: `${item._id.year}-${String(item._id.month).padStart(2, '0')}-${String(item._id.day).padStart(2, '0')}`,
             conversionRate: runningTotalUsers > 0 ? (runningActiveSubs / runningTotalUsers) * 100 : 0,
           };
         });
-
         historicalUserGrowth = historicalData.map(item => ({
           date: `${item._id.year}-${String(item._id.month).padStart(2, '0')}-${String(item._id.day).padStart(2, '0')}`,
           newUsers: item.newUsers,
         }));
       }
-
       res.json({
         period,
         overview: {
@@ -930,7 +957,7 @@ module.exports = (dependencies) => {
       const { period = '30d', breakdown = 'daily', startDate, endDate } = req.query;
       const { dateFilter } = getDateFilters(period, startDate, endDate);
       let groupBy = {};
-      if (period === '24h') {
+      if (period === '24h' || period === 'hourly') {
         groupBy = {
           year: { $year: '$createdAt' },
           month: { $month: '$createdAt' },
@@ -944,12 +971,18 @@ module.exports = (dependencies) => {
           day: { $dayOfMonth: '$createdAt' },
           hour: { $hour: '$createdAt' },
         };
-      } else if (breakdown === 'weekly' || period === '90d' || period === '1y') {
+      } else if (breakdown === 'weekly' || period === '90d' || period === '1y' || period === 'yearly') {
         groupBy = {
           year: { $year: '$createdAt' },
           week: { $week: '$createdAt' },
         };
+      } else if (breakdown === 'monthly' || period === 'monthly') {
+        groupBy = {
+          year: { $year: '$createdAt' },
+          month: { $month: '$createdAt' },
+        };
       } else {
+        // Default to daily
         groupBy = {
           year: { $year: '$createdAt' },
           month: { $month: '$createdAt' },
@@ -1082,15 +1115,30 @@ module.exports = (dependencies) => {
       const { period = '30d' } = req.query;
       let dateFilter = {};
       const now = new Date();
+      const currentTime = now.getTime();
+
       switch (period) {
         case '24h':
-          dateFilter = { timestamp: { $gte: new Date(now.getTime() - 24 * 60 * 60 * 1000) } };
+        case 'hourly':
+          dateFilter = { timestamp: { $gte: new Date(currentTime - 24 * 60 * 60 * 1000) } };
           break;
         case '7d':
-          dateFilter = { timestamp: { $gte: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000) } };
+        case 'daily':
+          dateFilter = { timestamp: { $gte: new Date(currentTime - 7 * 24 * 60 * 60 * 1000) } };
           break;
         case '30d':
-          dateFilter = { timestamp: { $gte: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000) } };
+        case 'monthly':
+          dateFilter = { timestamp: { $gte: new Date(currentTime - 30 * 24 * 60 * 60 * 1000) } };
+          break;
+        case '90d':
+          dateFilter = { timestamp: { $gte: new Date(currentTime - 90 * 24 * 60 * 60 * 1000) } };
+          break;
+        case '1y':
+        case 'yearly':
+          dateFilter = { timestamp: { $gte: new Date(currentTime - 365 * 24 * 60 * 60 * 1000) } };
+          break;
+        default:
+          dateFilter = {};
           break;
       }
       const [sessionActivity, messageActivity, toolActivity] = await Promise.all([
