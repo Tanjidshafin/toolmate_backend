@@ -319,17 +319,26 @@ module.exports = (dependencies) => {
       const { userEmail } = req.params;
       const { type, description, amount, currency, status, reason, feedback, metadata } = req.body;
       const userInfo = getUserInfoFromRequest(req);
-      const existingLog = await subscriptionStorage.findOne({
-        userEmail,
-        'metadata.stripeSessionId': metadata?.stripeSessionId,
-        status: 'completed',
-      });
-      if (existingLog) {
-        return res.status(200).json({
-          success: true,
-          message: 'Purchase already logged',
-          logId: existingLog._id.toString(),
+      if (metadata?.stripeSessionId) {
+        const existingLog = await subscriptionStorage.findOne({
+          userEmail,
+          'metadata.stripeSessionId': metadata.stripeSessionId,
+          status: 'completed',
         });
+        if (existingLog) {
+          console.warn(
+            `Duplicate purchase log attempt detected for user: ${userEmail}, stripeSessionId: ${metadata.stripeSessionId}. Returning existing log.`
+          );
+          return res.status(200).json({
+            success: true,
+            message: 'Purchase already logged',
+            logId: existingLog._id.toString(),
+          });
+        }
+      } else {
+        console.warn(
+          `Warning: stripeSessionId missing for purchase log for user ${userEmail}. Duplicate check might be less effective.`
+        );
       }
       if (!userEmail) {
         return res.status(400).json({ error: 'User email is required' });
@@ -391,6 +400,7 @@ module.exports = (dependencies) => {
       res.status(500).json({ error: 'Failed to add purchase log' });
     }
   });
+
   router.post('/api/subscription/:userEmail/cancel', async (req, res) => {
     try {
       const { userEmail } = req.params;
