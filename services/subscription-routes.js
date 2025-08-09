@@ -1,6 +1,6 @@
 const express = require('express');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-const { format, differenceInMonths, startOfMonth, endOfMonth, addMonths } = require('date-fns');
+const { format, differenceInMonths, startOfMonth, endOfMonth, addMonths, differenceInDays } = require('date-fns');
 
 module.exports = (dependencies) => {
   const {
@@ -337,79 +337,133 @@ module.exports = (dependencies) => {
       if (!type || !description) {
         return res.status(400).json({ error: 'Type and description are required' });
       }
-
       const user = await usersStorage.findOne({ userEmail });
       if (!user) {
         return res.status(404).json({ error: 'User not found' });
       }
-      let finalType = type;
+      const GRACE_PERIOD_DAYS = 30;
+      let logEntry;
+      let responseMessage = 'Purchase log added successfully';
       if (type === 'purchase' && status === 'completed') {
-        const currentMonth = new Date().getMonth();
-        const currentYear = new Date().getFullYear();
-        const recentCancellation = await subscriptionStorage.findOne({
-          userEmail,
-          type: 'cancellation',
-          status: 'cancelled',
-          $expr: {
-            $and: [{ $eq: [{ $month: '$date' }, currentMonth + 1] }, { $eq: [{ $year: '$date' }, currentYear] }],
+        const lastCancellation = await subscriptionStorage.findOne(
+          {
+            userEmail: userEmail,
+            type: 'cancellation',
           },
-        });
-        if (recentCancellation) {
-          finalType = 'reactivation';
+          { sort: { createdAt: -1 } }
+        );
+        const isWithinGracePeriod =
+          lastCancellation && differenceInDays(new Date(), lastCancellation.createdAt) <= GRACE_PERIOD_DAYS;
+        if (isWithinGracePeriod) {
+          await usersStorage.updateOne(
+            { userEmail },
+            {
+              $set: {
+                isSubscribed: true,
+                subscriptionReactivatedAt: new Date(),
+                updatedAt: new Date(),
+                subscriptionCancelReason: null,
+                subscriptionCancelFeedback: null,
+              },
+            }
+          );
+          logEntry = {
+            userEmail: userEmail,
+            userId: user.clerkId || userEmail,
+            clerkId: user.clerkId,
+            userName: user.userName,
+            type: 'reactivation',
+            description: 'Subscription reactivated within grace period',
+            amount: amount || 10,
+            currency: currency || 'AUD',
+            status: 'completed',
+            date: new Date(),
+            createdAt: new Date(),
+            reason: reason || null,
+            feedback: feedback || null,
+            metadata: {
+              ...metadata,
+              previousCancellationId: lastCancellation._id.toString(),
+              gracePeriodDays: GRACE_PERIOD_DAYS,
+              reactivationTrigger: 'automatic',
+              ...userInfo,
+              addedBy: 'system',
+            },
+          };
+
+          responseMessage = 'Subscription reactivated within grace period';
         }
       }
-      const logEntry = {
-        userEmail: userEmail,
-        userId: user.clerkId || userEmail,
-        clerkId: user.clerkId,
-        userName: user.userName,
-        type: finalType,
-        description: finalType === 'reactivation' ? `Reactivated ${description}` : description,
-        amount: amount || 0,
-        currency: currency || 'AUD',
-        status: status || 'completed',
-        date: new Date(),
-        createdAt: new Date(),
-        reason: reason || null,
-        feedback: feedback || null,
-        metadata: {
-          ...metadata,
-          ...userInfo,
-          addedBy: 'system',
-          reactivation: finalType === 'reactivation' ? true : undefined,
-        },
-      };
-      const result = await subscriptionStorage.insertOne(logEntry);
-      if (finalType === 'purchase' || finalType === 'reactivation') {
-        await usersStorage.updateOne({ userEmail }, { $set: { isSubscribed: true } });
+      if (!logEntry) {
+        logEntry = {
+          userEmail: userEmail,
+          userId: user.clerkId || userEmail,
+          clerkId: user.clerkId,
+          userName: user.userName,
+          type: type,
+          description: description,
+          amount: amount || 0,
+          currency: currency || 'AUD',
+          status: status || 'completed',
+          date: new Date(),
+          createdAt: new Date(),
+          reason: reason || null,
+          feedback: feedback || null,
+          metadata: {
+            ...metadata,
+            ...userInfo,
+            addedBy: 'system',
+          },
+        };
+        if (type === 'purchase' && status === 'completed') {
+          await usersStorage.updateOne(
+            { userEmail },
+            {
+              $set: {
+                isSubscribed: true,
+                updatedAt: new Date(),
+              },
+            }
+          );
+        }
       }
-      // Log audit trail
+      const result = await subscriptionStorage.insertOne(logEntry);
       await auditLogger.logAudit({
-        action: 'CREATE_PURCHASE_LOG',
-        resource: 'subscription_log',
+        action: logEntry.type === 'reactivation' ? 'AUTO_REACTIVATE_SUBSCRIPTION' : 'CREATE_PURCHASE_LOG',
+        resource: logEntry.type === 'reactivation' ? 'subscription' : 'subscription_log',
         resourceId: result.insertedId.toString(),
         userId: user._id.toString(),
         userEmail: userEmail,
         role: user.role || 'user',
         newData: logEntry,
         metadata: {
-          logType: finalType,
+          logType: logEntry.type,
           ...userInfo,
         },
       });
-
-      res.json({
+      const response = {
         success: true,
-        message: 'Purchase log added successfully',
+        message: responseMessage,
         logId: result.insertedId,
         log: {
           ...logEntry,
           id: result.insertedId.toString(),
         },
-      });
+        isReactivation: logEntry.type === 'reactivation',
+      };
+      if (logEntry.type === 'reactivation' && lastCancellation) {
+        response.reactivationDetails = {
+          gracePeriodDays: GRACE_PERIOD_DAYS,
+          previousCancellationId: logEntry.metadata.previousCancellationId,
+        };
+      }
+      res.json(response);
     } catch (error) {
-      console.error('Error in purchase log:', error);
-      res.status(500).json({ error: 'Failed to add purchase log' });
+      console.error('Error in purchase-logs endpoint:', error);
+      res.status(500).json({
+        error: 'Failed to add purchase log',
+        details: error.message,
+      });
     }
   });
 
@@ -516,7 +570,7 @@ module.exports = (dependencies) => {
         userName: user.userName,
         type: 'reactivation',
         description: 'Subscription reactivated',
-        amount: 29.99,
+        amount: 10,
         currency: 'AUD',
         status: 'completed',
         date: new Date(),
