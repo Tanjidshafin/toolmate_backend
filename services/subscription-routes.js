@@ -319,115 +319,151 @@ module.exports = (dependencies) => {
       const { userEmail } = req.params;
       const { type, description, amount, currency, status, reason, feedback, metadata } = req.body;
       const userInfo = getUserInfoFromRequest(req);
+
+      // Enhanced validation
       if (!userEmail) {
         return res.status(400).json({ error: 'User email is required' });
       }
+
       if (!type || !description) {
         return res.status(400).json({ error: 'Type and description are required' });
       }
-      const duplicateCheckCriteria = {
-        userEmail,
-        type,
-        description,
-        status,
-      };
-      if (metadata?.stripeSessionId) {
-        duplicateCheckCriteria['metadata.stripeSessionId'] = metadata.stripeSessionId;
-      }
-      const existingLog = await subscriptionStorage.findOne(duplicateCheckCriteria);
-      if (existingLog) {
-        return res.status(200).json({
-          success: true,
-          message: 'Purchase already logged',
-          logId: existingLog._id.toString(),
-          duplicate: true,
-        });
-      }
+
       const user = await usersStorage.findOne({ userEmail });
       if (!user) {
         return res.status(404).json({ error: 'User not found' });
       }
+
+      // Check if this is a potential reactivation case first
       let isReactivation = false;
-      let logEntry = null;
-      let reactivationInfo = null;
+      let lastCancellation = null;
       const GRACE_PERIOD_DAYS = 30;
+
       if (type === 'purchase' && status === 'completed') {
-        const lastCancellation = await subscriptionStorage.findOne(
+        lastCancellation = await subscriptionStorage.findOne(
           {
             userEmail: userEmail,
             type: 'cancellation',
           },
           { sort: { createdAt: -1 } }
         );
+
         const isWithinGracePeriod =
           lastCancellation && differenceInDays(new Date(), lastCancellation.createdAt) <= GRACE_PERIOD_DAYS;
+
         if (isWithinGracePeriod) {
           isReactivation = true;
-          await usersStorage.updateOne(
-            { userEmail },
-            {
-              $set: {
-                isSubscribed: true,
-                subscriptionReactivatedAt: new Date(),
-                updatedAt: new Date(),
-                subscriptionCancelReason: null,
-                subscriptionCancelFeedback: null,
-              },
-            }
-          );
-          logEntry = {
-            userEmail: userEmail,
-            userId: user.clerkId || userEmail,
-            clerkId: user.clerkId,
-            userName: user.userName,
-            type: 'reactivation',
-            description: 'Subscription reactivated within grace period',
-            amount: amount || 29.99,
-            currency: currency || 'AUD',
-            status: 'completed',
-            date: new Date(),
-            createdAt: new Date(),
-            metadata: {
-              ...metadata,
-              previousCancellationId: lastCancellation._id.toString(),
-              gracePeriodDays: GRACE_PERIOD_DAYS,
-              reactivationTrigger: 'automatic',
-              ...userInfo,
-              addedBy: 'system',
-              requestId: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-            },
-          };
-          reactivationInfo = {
-            gracePeriodDays: GRACE_PERIOD_DAYS,
-            previousCancellationId: lastCancellation._id.toString(),
-          };
-          await auditLogger.logAudit({
-            action: 'AUTO_REACTIVATE_SUBSCRIPTION',
-            resource: 'subscription',
-            resourceId: user._id.toString(),
-            userId: user._id.toString(),
-            userEmail: userEmail,
-            role: user.role || 'user',
-            oldData: {
-              isSubscribed: false,
-              subscriptionCancelledAt: user.subscriptionCancelledAt,
-              subscriptionCancelReason: user.subscriptionCancelReason,
-            },
-            newData: {
+        }
+      }
+
+      // Build duplicate check criteria based on whether it's a reactivation or not
+      const duplicateCheckCriteria = {
+        userEmail,
+        status,
+      };
+
+      if (isReactivation) {
+        // For reactivations, check for existing reactivation entries
+        duplicateCheckCriteria.type = 'reactivation';
+        // Also check by stripeSessionId if available
+        if (metadata?.stripeSessionId) {
+          duplicateCheckCriteria['metadata.stripeSessionId'] = metadata.stripeSessionId;
+        }
+      } else {
+        // For regular entries, use original logic
+        duplicateCheckCriteria.type = type;
+        duplicateCheckCriteria.description = description;
+        if (metadata?.stripeSessionId) {
+          duplicateCheckCriteria['metadata.stripeSessionId'] = metadata.stripeSessionId;
+        }
+      }
+
+      // Check for existing log
+      const existingLog = await subscriptionStorage.findOne(duplicateCheckCriteria);
+
+      if (existingLog) {
+        return res.status(200).json({
+          success: true,
+          message: isReactivation ? 'Reactivation already logged' : 'Purchase already logged',
+          logId: existingLog._id.toString(),
+          duplicate: true,
+          isReactivation: isReactivation,
+        });
+      }
+
+      let logEntry = null;
+      let reactivationInfo = null;
+
+      if (isReactivation) {
+        // This is a REACTIVATION - create only reactivation entry
+        await usersStorage.updateOne(
+          { userEmail },
+          {
+            $set: {
               isSubscribed: true,
               subscriptionReactivatedAt: new Date(),
               updatedAt: new Date(),
+              subscriptionCancelReason: null,
+              subscriptionCancelFeedback: null,
             },
-            metadata: {
-              reason: 'Purchase within grace period of cancellation',
-              cancellationDate: lastCancellation.createdAt,
-              gracePeriodDays: GRACE_PERIOD_DAYS,
-              ...userInfo,
-            },
-          });
-        }
-      }
-      if (!isReactivation) {
+          }
+        );
+
+        logEntry = {
+          userEmail: userEmail,
+          userId: user.clerkId || userEmail,
+          clerkId: user.clerkId,
+          userName: user.userName,
+          type: 'reactivation',
+          description: 'Subscription reactivated within grace period',
+          amount: amount || 29.99,
+          currency: currency || 'AUD',
+          status: 'completed',
+          date: new Date(),
+          createdAt: new Date(),
+          metadata: {
+            ...metadata,
+            previousCancellationId: lastCancellation._id.toString(),
+            gracePeriodDays: GRACE_PERIOD_DAYS,
+            reactivationTrigger: 'automatic',
+            originalPurchaseType: type, // Store original type for reference
+            ...userInfo,
+            addedBy: 'system',
+            requestId: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+          },
+        };
+
+        reactivationInfo = {
+          gracePeriodDays: GRACE_PERIOD_DAYS,
+          previousCancellationId: lastCancellation._id.toString(),
+        };
+
+        await auditLogger.logAudit({
+          action: 'AUTO_REACTIVATE_SUBSCRIPTION',
+          resource: 'subscription',
+          resourceId: user._id.toString(),
+          userId: user._id.toString(),
+          userEmail: userEmail,
+          role: user.role || 'user',
+          oldData: {
+            isSubscribed: false,
+            subscriptionCancelledAt: user.subscriptionCancelledAt,
+            subscriptionCancelReason: user.subscriptionCancelReason,
+          },
+          newData: {
+            isSubscribed: true,
+            subscriptionReactivatedAt: new Date(),
+            updatedAt: new Date(),
+          },
+          metadata: {
+            reason: 'Purchase within grace period of cancellation',
+            cancellationDate: lastCancellation.createdAt,
+            gracePeriodDays: GRACE_PERIOD_DAYS,
+            ...userInfo,
+          },
+        });
+      } else {
+        // Regular log entry (purchase, cancellation, etc.)
         logEntry = {
           userEmail: userEmail,
           userId: user.clerkId || userEmail,
@@ -449,6 +485,8 @@ module.exports = (dependencies) => {
             requestId: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
           },
         };
+
+        // Update user subscription status for completed purchases
         if (type === 'purchase' && status === 'completed') {
           await usersStorage.updateOne(
             { userEmail },
@@ -461,13 +499,18 @@ module.exports = (dependencies) => {
           );
         }
       }
+
+      // Final duplicate check with the correct criteria right before insertion
       const finalDuplicateCheck = await subscriptionStorage.findOne(duplicateCheckCriteria);
       if (finalDuplicateCheck) {
         return res.status(200).json({
           success: true,
-          message: 'Purchase already logged (race condition prevented)',
+          message: isReactivation
+            ? 'Reactivation already logged (race condition prevented)'
+            : 'Purchase already logged (race condition prevented)',
           logId: finalDuplicateCheck._id.toString(),
           duplicate: true,
+          isReactivation: isReactivation,
         });
       }
       const result = await subscriptionStorage.insertOne(logEntry);
@@ -496,6 +539,7 @@ module.exports = (dependencies) => {
         duplicate: false,
         isReactivation: isReactivation,
       };
+
       if (isReactivation && reactivationInfo) {
         response.reactivation = {
           id: result.insertedId.toString(),
@@ -513,7 +557,6 @@ module.exports = (dependencies) => {
       });
     }
   });
-
   router.post('/api/subscription/:userEmail/cancel', async (req, res) => {
     try {
       const { userEmail } = req.params;
