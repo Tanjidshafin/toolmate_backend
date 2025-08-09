@@ -319,23 +319,52 @@ module.exports = (dependencies) => {
       const { userEmail } = req.params;
       const { type, description, amount, currency, status, reason, feedback, metadata } = req.body;
       const userInfo = getUserInfoFromRequest(req);
+      const existingLog = await subscriptionStorage.findOne({
+        userEmail,
+        'metadata.stripeSessionId': metadata?.stripeSessionId,
+        status: 'completed',
+      });
+      if (existingLog) {
+        return res.status(200).json({
+          success: true,
+          message: 'Purchase already logged',
+          logId: existingLog._id.toString(),
+        });
+      }
       if (!userEmail) {
         return res.status(400).json({ error: 'User email is required' });
       }
       if (!type || !description) {
         return res.status(400).json({ error: 'Type and description are required' });
       }
+
       const user = await usersStorage.findOne({ userEmail });
       if (!user) {
         return res.status(404).json({ error: 'User not found' });
+      }
+      let finalType = type;
+      if (type === 'purchase' && status === 'completed') {
+        const currentMonth = new Date().getMonth();
+        const currentYear = new Date().getFullYear();
+        const recentCancellation = await subscriptionStorage.findOne({
+          userEmail,
+          type: 'cancellation',
+          status: 'cancelled',
+          $expr: {
+            $and: [{ $eq: [{ $month: '$date' }, currentMonth + 1] }, { $eq: [{ $year: '$date' }, currentYear] }],
+          },
+        });
+        if (recentCancellation) {
+          finalType = 'reactivation';
+        }
       }
       const logEntry = {
         userEmail: userEmail,
         userId: user.clerkId || userEmail,
         clerkId: user.clerkId,
         userName: user.userName,
-        type: type,
-        description: description,
+        type: finalType,
+        description: finalType === 'reactivation' ? `Reactivated ${description}` : description,
         amount: amount || 0,
         currency: currency || 'AUD',
         status: status || 'completed',
@@ -347,10 +376,11 @@ module.exports = (dependencies) => {
           ...metadata,
           ...userInfo,
           addedBy: 'system',
+          reactivation: finalType === 'reactivation' ? true : undefined,
         },
       };
       const result = await subscriptionStorage.insertOne(logEntry);
-      if (type === 'purchase') {
+      if (finalType === 'purchase' || finalType === 'reactivation') {
         await usersStorage.updateOne({ userEmail }, { $set: { isSubscribed: true } });
       }
       // Log audit trail
@@ -363,10 +393,11 @@ module.exports = (dependencies) => {
         role: user.role || 'user',
         newData: logEntry,
         metadata: {
-          logType: type,
+          logType: finalType,
           ...userInfo,
         },
       });
+
       res.json({
         success: true,
         message: 'Purchase log added successfully',
@@ -377,6 +408,7 @@ module.exports = (dependencies) => {
         },
       });
     } catch (error) {
+      console.error('Error in purchase log:', error);
       res.status(500).json({ error: 'Failed to add purchase log' });
     }
   });
