@@ -427,6 +427,18 @@ module.exports = (dependencies) => {
           );
         }
       }
+      const existingLog2 = await subscriptionStorage.findOne({
+        userEmail,
+        'metadata.stripeSessionId': metadata?.stripeSessionId,
+        status: 'completed',
+      });
+      if (existingLog2) {
+        return res.status(200).json({
+          success: true,
+          message: 'Purchase already logged',
+          logId: existingLog._id.toString(),
+        });
+      }
       const result = await subscriptionStorage.insertOne(logEntry);
       await auditLogger.logAudit({
         action: logEntry.type === 'reactivation' ? 'AUTO_REACTIVATE_SUBSCRIPTION' : 'CREATE_PURCHASE_LOG',
@@ -779,7 +791,6 @@ module.exports = (dependencies) => {
       const totalRevenueAmount = totalRevenue[0]?.total || 0;
       const periodRevenueAmount = revenueInPeriod[0]?.total || 0;
       const conversionRate = totalUsers > 0 ? ((activeSubscriptions / totalUsers) * 100).toFixed(2) : 0;
-
       let growthMetrics = {};
       let historicalConversionRate = [];
       let historicalUserGrowth = [];
@@ -1098,7 +1109,6 @@ module.exports = (dependencies) => {
           month: { $month: '$createdAt' },
         };
       } else {
-        // Default to daily
         groupBy = {
           year: { $year: '$createdAt' },
           month: { $month: '$createdAt' },
@@ -1110,7 +1120,7 @@ module.exports = (dependencies) => {
           .aggregate([
             {
               $match: {
-                type: 'purchase',
+                type: { $in: ['purchase', 'reactivation'] },
                 status: 'completed',
                 ...dateFilter,
               },
