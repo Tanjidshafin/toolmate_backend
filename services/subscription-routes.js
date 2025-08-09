@@ -319,101 +319,15 @@ module.exports = (dependencies) => {
       const { userEmail } = req.params;
       const { type, description, amount, currency, status, reason, feedback, metadata } = req.body;
       const userInfo = getUserInfoFromRequest(req);
-
-      // Input validation
       if (!userEmail) {
         return res.status(400).json({ error: 'User email is required' });
       }
       if (!type || !description) {
         return res.status(400).json({ error: 'Type and description are required' });
       }
-
-      // Get user data
       const user = await usersStorage.findOne({ userEmail });
       if (!user) {
         return res.status(404).json({ error: 'User not found' });
-      }
-
-      // Check for reactivation scenario
-      let reactivationData = null;
-      const GRACE_PERIOD_DAYS = 30; // Configurable grace period
-
-      if (type === 'purchase' && status === 'completed') {
-        const lastCancellation = await subscriptionStorage.findOne(
-          {
-            userEmail: userEmail,
-            type: 'cancellation',
-          },
-          { sort: { createdAt: -1 } }
-        );
-
-        const isWithinGracePeriod =
-          lastCancellation && differenceInDays(new Date(), lastCancellation.createdAt) <= GRACE_PERIOD_DAYS;
-
-        if (isWithinGracePeriod) {
-          // Update user subscription status
-          await usersStorage.updateOne(
-            { userEmail },
-            {
-              $set: {
-                isSubscribed: true,
-                subscriptionReactivatedAt: new Date(),
-                updatedAt: new Date(),
-                subscriptionCancelReason: null,
-                subscriptionCancelFeedback: null,
-              },
-            }
-          );
-
-          // Create reactivation log
-          reactivationData = {
-            userEmail: userEmail,
-            userId: user.clerkId || userEmail,
-            clerkId: user.clerkId,
-            userName: user.userName,
-            type: 'reactivation',
-            description: 'Subscription reactivated within grace period',
-            amount: amount || 29.99,
-            currency: currency || 'AUD',
-            status: 'completed',
-            date: new Date(),
-            createdAt: new Date(),
-            metadata: {
-              ...metadata,
-              previousCancellationId: lastCancellation._id.toString(),
-              gracePeriodDays: GRACE_PERIOD_DAYS,
-              reactivationTrigger: 'automatic',
-              ...userInfo,
-              addedBy: 'system',
-            },
-          };
-          const reactivationResult = await subscriptionStorage.insertOne(reactivationData);
-          reactivationData._id = reactivationResult.insertedId;
-          await auditLogger.logAudit({
-            action: 'AUTO_REACTIVATE_SUBSCRIPTION',
-            resource: 'subscription',
-            resourceId: user._id.toString(),
-            userId: user._id.toString(),
-            userEmail: userEmail,
-            role: user.role || 'user',
-            oldData: {
-              isSubscribed: false,
-              subscriptionCancelledAt: user.subscriptionCancelledAt,
-              subscriptionCancelReason: user.subscriptionCancelReason,
-            },
-            newData: {
-              isSubscribed: true,
-              subscriptionReactivatedAt: new Date(),
-              updatedAt: new Date(),
-            },
-            metadata: {
-              reason: 'Purchase within grace period of cancellation',
-              cancellationDate: lastCancellation.createdAt,
-              gracePeriodDays: GRACE_PERIOD_DAYS,
-              ...userInfo,
-            },
-          });
-        }
       }
       const logEntry = {
         userEmail: userEmail,
@@ -433,21 +347,13 @@ module.exports = (dependencies) => {
           ...metadata,
           ...userInfo,
           addedBy: 'system',
-          ...(reactivationData ? { relatedReactivationId: reactivationData._id.toString() } : {}),
         },
       };
       const result = await subscriptionStorage.insertOne(logEntry);
-      if (type === 'purchase' && status === 'completed' && !reactivationData) {
-        await usersStorage.updateOne(
-          { userEmail },
-          {
-            $set: {
-              isSubscribed: true,
-              updatedAt: new Date(),
-            },
-          }
-        );
+      if (type === 'purchase') {
+        await usersStorage.updateOne({ userEmail }, { $set: { isSubscribed: true } });
       }
+      // Log audit trail
       await auditLogger.logAudit({
         action: 'CREATE_PURCHASE_LOG',
         resource: 'subscription_log',
@@ -459,10 +365,9 @@ module.exports = (dependencies) => {
         metadata: {
           logType: type,
           ...userInfo,
-          ...(reactivationData ? { isReactivation: true } : {}),
         },
       });
-      const response = {
+      res.json({
         success: true,
         message: 'Purchase log added successfully',
         logId: result.insertedId,
@@ -470,24 +375,12 @@ module.exports = (dependencies) => {
           ...logEntry,
           id: result.insertedId.toString(),
         },
-      };
-      if (reactivationData) {
-        response.reactivation = {
-          id: reactivationData._id.toString(),
-          message: 'Subscription reactivated within grace period',
-          gracePeriodDays: GRACE_PERIOD_DAYS,
-          previousCancellationId: reactivationData.metadata.previousCancellationId,
-        };
-      }
-      res.json(response);
-    } catch (error) {
-      console.error('Error in purchase-logs endpoint:', error);
-      res.status(500).json({
-        error: 'Failed to add purchase log',
-        details: error.message,
       });
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to add purchase log' });
     }
   });
+
   router.post('/api/subscription/:userEmail/cancel', async (req, res) => {
     try {
       const { userEmail } = req.params;
@@ -503,6 +396,7 @@ module.exports = (dependencies) => {
       if (!user.isSubscribed) {
         return res.status(400).json({ error: 'No active subscription to cancel' });
       }
+      // Update user subscription status
       const updateData = {
         isSubscribed: false,
         subscriptionCancelledAt: new Date(),
@@ -511,6 +405,7 @@ module.exports = (dependencies) => {
         updatedAt: new Date(),
       };
       await usersStorage.updateOne({ userEmail }, { $set: updateData });
+      // Add cancellation log to subscriptionStorage
       const cancellationLog = {
         userEmail: userEmail,
         userId: user.clerkId || userEmail,
@@ -531,6 +426,7 @@ module.exports = (dependencies) => {
         },
       };
       await subscriptionStorage.insertOne(cancellationLog);
+      // Log audit trail
       await auditLogger.logAudit({
         action: 'CANCEL_SUBSCRIPTION',
         resource: 'subscription',
@@ -558,6 +454,72 @@ module.exports = (dependencies) => {
       res.status(500).json({ error: 'Failed to cancel subscription' });
     }
   });
+
+  router.post('/api/subscription/:userEmail/reactivate', async (req, res) => {
+    try {
+      const { userEmail } = req.params;
+      const userInfo = getUserInfoFromRequest(req);
+      if (!userEmail) {
+        return res.status(400).json({ error: 'User email is required' });
+      }
+      const user = await usersStorage.findOne({ userEmail });
+      if (!user) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      if (user.isSubscribed) {
+        return res.status(400).json({ error: 'Subscription is already active' });
+      }
+      // Update user subscription status
+      const updateData = {
+        isSubscribed: true,
+        subscriptionReactivatedAt: new Date(),
+        updatedAt: new Date(),
+      };
+      await usersStorage.updateOne({ userEmail }, { $set: updateData });
+      const reactivationLog = {
+        userEmail: userEmail,
+        userId: user.clerkId || userEmail,
+        clerkId: user.clerkId,
+        userName: user.userName,
+        type: 'reactivation',
+        description: 'Subscription reactivated',
+        amount: 29.99,
+        currency: 'AUD',
+        status: 'completed',
+        date: new Date(),
+        createdAt: new Date(),
+        metadata: {
+          ...userInfo,
+          newPlan: 'premium',
+        },
+      };
+      await subscriptionStorage.insertOne(reactivationLog);
+      // Log audit trail
+      await auditLogger.logAudit({
+        action: 'REACTIVATE_SUBSCRIPTION',
+        resource: 'subscription',
+        resourceId: user._id.toString(),
+        userId: user._id.toString(),
+        userEmail: userEmail,
+        role: user.role || 'user',
+        oldData: {
+          isSubscribed: user.isSubscribed,
+        },
+        newData: updateData,
+        metadata: userInfo,
+      });
+
+      res.json({
+        success: true,
+        message: 'Subscription reactivated successfully',
+        reactivationDate: new Date(),
+      });
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to reactivate subscription' });
+    }
+  });
+
   router.get('/api/subscription/:userEmail/usage-details', async (req, res) => {
     try {
       const { userEmail } = req.params;
