@@ -341,9 +341,10 @@ module.exports = (dependencies) => {
       if (!user) {
         return res.status(404).json({ error: 'User not found' });
       }
-      const GRACE_PERIOD_DAYS = 30;
-      let logEntry;
-      let responseMessage = 'Purchase log added successfully';
+      // Check for reactivation scenario
+      let reactivationData = null;
+      const GRACE_PERIOD_DAYS = 30; // Configurable grace period
+
       if (type === 'purchase' && status === 'completed') {
         const lastCancellation = await subscriptionStorage.findOne(
           {
@@ -352,9 +353,12 @@ module.exports = (dependencies) => {
           },
           { sort: { createdAt: -1 } }
         );
+
         const isWithinGracePeriod =
           lastCancellation && differenceInDays(new Date(), lastCancellation.createdAt) <= GRACE_PERIOD_DAYS;
+
         if (isWithinGracePeriod) {
+          // Update user subscription status
           await usersStorage.updateOne(
             { userEmail },
             {
@@ -367,20 +371,20 @@ module.exports = (dependencies) => {
               },
             }
           );
-          logEntry = {
+
+          // Create reactivation log
+          reactivationData = {
             userEmail: userEmail,
             userId: user.clerkId || userEmail,
             clerkId: user.clerkId,
             userName: user.userName,
             type: 'reactivation',
             description: 'Subscription reactivated within grace period',
-            amount: amount || 10,
+            amount: amount || 29.99,
             currency: currency || 'AUD',
             status: 'completed',
             date: new Date(),
             createdAt: new Date(),
-            reason: reason || null,
-            feedback: feedback || null,
             metadata: {
               ...metadata,
               previousCancellationId: lastCancellation._id.toString(),
@@ -391,82 +395,100 @@ module.exports = (dependencies) => {
             },
           };
 
-          responseMessage = 'Subscription reactivated within grace period';
+          const reactivationResult = await subscriptionStorage.insertOne(reactivationData);
+          reactivationData._id = reactivationResult.insertedId;
+
+          // Audit log for reactivation
+          await auditLogger.logAudit({
+            action: 'AUTO_REACTIVATE_SUBSCRIPTION',
+            resource: 'subscription',
+            resourceId: user._id.toString(),
+            userId: user._id.toString(),
+            userEmail: userEmail,
+            role: user.role || 'user',
+            oldData: {
+              isSubscribed: false,
+              subscriptionCancelledAt: user.subscriptionCancelledAt,
+              subscriptionCancelReason: user.subscriptionCancelReason,
+            },
+            newData: {
+              isSubscribed: true,
+              subscriptionReactivatedAt: new Date(),
+              updatedAt: new Date(),
+            },
+            metadata: {
+              reason: 'Purchase within grace period of cancellation',
+              cancellationDate: lastCancellation.createdAt,
+              gracePeriodDays: GRACE_PERIOD_DAYS,
+              ...userInfo,
+            },
+          });
         }
       }
-      if (!logEntry) {
-        logEntry = {
-          userEmail: userEmail,
-          userId: user.clerkId || userEmail,
-          clerkId: user.clerkId,
-          userName: user.userName,
-          type: type,
-          description: description,
-          amount: amount || 0,
-          currency: currency || 'AUD',
-          status: status || 'completed',
-          date: new Date(),
-          createdAt: new Date(),
-          reason: reason || null,
-          feedback: feedback || null,
-          metadata: {
-            ...metadata,
-            ...userInfo,
-            addedBy: 'system',
-          },
-        };
-        if (type === 'purchase' && status === 'completed') {
-          await usersStorage.updateOne(
-            { userEmail },
-            {
-              $set: {
-                isSubscribed: true,
-                updatedAt: new Date(),
-              },
-            }
-          );
-        }
-      }
-      const existingLog2 = await subscriptionStorage.findOne({
-        userEmail,
-        'metadata.stripeSessionId': metadata?.stripeSessionId,
-        status: 'completed',
-      });
-      if (existingLog2) {
-        return res.status(200).json({
-          success: true,
-          message: 'Purchase already logged',
-          logId: existingLog._id.toString(),
-        });
-      }
+
+      // Create the main purchase log
+      const logEntry = {
+        userEmail: userEmail,
+        userId: user.clerkId || userEmail,
+        clerkId: user.clerkId,
+        userName: user.userName,
+        type: type,
+        description: description,
+        amount: amount || 0,
+        currency: currency || 'AUD',
+        status: status || 'completed',
+        date: new Date(),
+        createdAt: new Date(),
+        reason: reason || null,
+        feedback: feedback || null,
+        metadata: {
+          ...metadata,
+          ...userInfo,
+          addedBy: 'system',
+          ...(reactivationData ? { relatedReactivationId: reactivationData._id.toString() } : {}),
+        },
+      };
       const result = await subscriptionStorage.insertOne(logEntry);
+      if (type === 'purchase' && status === 'completed' && !reactivationData) {
+        await usersStorage.updateOne(
+          { userEmail },
+          {
+            $set: {
+              isSubscribed: true,
+              updatedAt: new Date(),
+            },
+          }
+        );
+      }
       await auditLogger.logAudit({
-        action: logEntry.type === 'reactivation' ? 'AUTO_REACTIVATE_SUBSCRIPTION' : 'CREATE_PURCHASE_LOG',
-        resource: logEntry.type === 'reactivation' ? 'subscription' : 'subscription_log',
+        action: 'CREATE_PURCHASE_LOG',
+        resource: 'subscription_log',
         resourceId: result.insertedId.toString(),
         userId: user._id.toString(),
         userEmail: userEmail,
         role: user.role || 'user',
         newData: logEntry,
         metadata: {
-          logType: logEntry.type,
+          logType: type,
           ...userInfo,
+          ...(reactivationData ? { isReactivation: true } : {}),
         },
       });
       const response = {
         success: true,
-        message: responseMessage,
+        message: 'Purchase log added successfully',
         logId: result.insertedId,
         log: {
           ...logEntry,
           id: result.insertedId.toString(),
         },
-        isReactivation: logEntry.type === 'reactivation',
       };
-      if (logEntry.type === 'reactivation' && lastCancellation) {
-        response.reactivationDetails = {
+      if (reactivationData) {
+        response.reactivation = {
+          id: reactivationData._id.toString(),
+          message: 'Subscription automatically reactivated within grace period',
           gracePeriodDays: GRACE_PERIOD_DAYS,
-          previousCancellationId: logEntry.metadata.previousCancellationId,
+          previousCancellationId: reactivationData.metadata.previousCancellationId,
         };
       }
       res.json(response);
@@ -1120,7 +1142,7 @@ module.exports = (dependencies) => {
           .aggregate([
             {
               $match: {
-                type: { $in: ['purchase', 'reactivation'] },
+                type: 'purchase',
                 status: 'completed',
                 ...dateFilter,
               },
