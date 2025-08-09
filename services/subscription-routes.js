@@ -1,6 +1,7 @@
 const express = require('express');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { format, differenceInMonths, startOfMonth, endOfMonth, addMonths } = require('date-fns');
+
 module.exports = (dependencies) => {
   const {
     usersStorage,
@@ -13,30 +14,32 @@ module.exports = (dependencies) => {
     shedToolsStorage,
     subscriptionStorage,
   } = dependencies;
+
   const router = express.Router();
+
   const getDateFilters = (period, startDate, endDate) => {
     let dateFilter = {};
     let previousPeriodFilter = {};
     const now = new Date();
-    
+
     if (startDate && endDate) {
       const start = new Date(startDate);
       const end = new Date(endDate);
-      
+
       // Validate dates
       if (isNaN(start.getTime()) || isNaN(end.getTime())) {
         throw new Error('Invalid date range provided');
       }
-      
+
       dateFilter = { createdAt: { $gte: start, $lte: end } };
       const diffTime = Math.abs(end.getTime() - start.getTime());
-      const prevStart = new Date(start.getTime() - diffTime - (24 * 60 * 60 * 1000)); 
-      const prevEnd = new Date(start.getTime() - (24 * 60 * 60 * 1000));
+      const prevStart = new Date(start.getTime() - diffTime - 24 * 60 * 60 * 1000);
+      const prevEnd = new Date(start.getTime() - 24 * 60 * 60 * 1000);
       previousPeriodFilter = { createdAt: { $gte: prevStart, $lte: prevEnd } };
     } else {
       // Ensure we're working with a valid date
       const currentTime = now.getTime();
-      
+
       switch (period) {
         case '24h':
         case 'hourly':
@@ -99,9 +102,10 @@ module.exports = (dependencies) => {
           break;
       }
     }
-    
+
     return { dateFilter, previousPeriodFilter };
   };
+
   // Create Stripe Checkout Session
   router.post('/api/create-checkout-session', async (req, res) => {
     try {
@@ -154,6 +158,7 @@ module.exports = (dependencies) => {
       res.status(500).json({ error: 'Failed to create checkout session' });
     }
   });
+
   // Get user subscription details
   router.get('/api/subscription/:userEmail', async (req, res) => {
     try {
@@ -225,7 +230,7 @@ module.exports = (dependencies) => {
           lastActivity = lastSession.timestamp;
         }
       } catch (error) {
-        // Silent error handling
+        console.log(error);
       }
       const subscriptionData = {
         user: {
@@ -629,6 +634,7 @@ module.exports = (dependencies) => {
       res.status(500).json({ error: 'Failed to fetch usage details' });
     }
   });
+
   router.get('/api/admin/analytics/subscriptions', async (req, res) => {
     try {
       const userInfo = getUserInfoFromRequest(req);
@@ -683,6 +689,7 @@ module.exports = (dependencies) => {
         }),
         subscriptionStorage.find(dateFilter).sort({ createdAt: -1 }).limit(10).toArray(),
       ]);
+
       const totalRevenueAmount = totalRevenue[0]?.total || 0;
       const periodRevenueAmount = revenueInPeriod[0]?.total || 0;
       const conversionRate = totalUsers > 0 ? ((activeSubscriptions / totalUsers) * 100).toFixed(2) : 0;
@@ -739,7 +746,7 @@ module.exports = (dependencies) => {
               {
                 $match: {
                   createdAt: {
-                    $gte: new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000), 
+                    $gte: new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000),
                     $lte: now,
                   },
                 },
@@ -769,41 +776,62 @@ module.exports = (dependencies) => {
         growthMetrics = {
           userGrowth: previousUsers > 0 ? (((newUsersInPeriod - previousUsers) / previousUsers) * 100).toFixed(2) : 0,
           revenueGrowth:
-            prevRevenueAmount > 0 ? (((periodRevenueAmount - prevRevenueAmount) / prevRevenueAmount) * 100).toFixed(2) : 0,
+            prevRevenueAmount > 0
+              ? (((periodRevenueAmount - prevRevenueAmount) / prevRevenueAmount) * 100).toFixed(2)
+              : 0,
           subscriptionGrowth:
             previousSubscriptions > 0
               ? (((newSubscriptionsInPeriod - previousSubscriptions) / previousSubscriptions) * 100).toFixed(2)
               : 0,
           conversionRateGrowth:
-            prevConversionRate > 0 ? (((parseFloat(conversionRate) - parseFloat(prevConversionRate)) / parseFloat(prevConversionRate)) * 100).toFixed(2) : 0,
+            prevConversionRate > 0
+              ? (
+                  ((Number.parseFloat(conversionRate) - Number.parseFloat(prevConversionRate)) /
+                    Number.parseFloat(prevConversionRate)) *
+                  100
+                ).toFixed(2)
+              : 0,
           newSubscriptionsGrowth:
             previousSubscriptions > 0
               ? (((newSubscriptionsInPeriod - previousSubscriptions) / previousSubscriptions) * 100).toFixed(2)
               : 0,
           netSubscriptionChangeGrowth:
             previousNetSubscriptionChange !== 0
-              ? (((newSubscriptionsInPeriod + reactivationsInPeriod - cancellationsInPeriod - previousNetSubscriptionChange) / previousNetSubscriptionChange) * 100).toFixed(2)
+              ? (
+                  ((newSubscriptionsInPeriod +
+                    reactivationsInPeriod -
+                    cancellationsInPeriod -
+                    previousNetSubscriptionChange) /
+                    Math.abs(previousNetSubscriptionChange)) *
+                  100
+                ).toFixed(2)
               : 0,
           cancellationsGrowth:
             previousCancellations > 0
               ? (((cancellationsInPeriod - previousCancellations) / previousCancellations) * 100).toFixed(2)
               : 0,
         };
+
         let runningTotalUsers = 0;
         let runningActiveSubs = 0;
-        historicalConversionRate = historicalData.map(item => {
-          runningTotalUsers += item.newUsers; 
+        historicalConversionRate = historicalData.map((item) => {
+          runningTotalUsers += item.newUsers;
           runningActiveSubs += item.activeSubscriptions;
           return {
-            date: `${item._id.year}-${String(item._id.month).padStart(2, '0')}-${String(item._id.day).padStart(2, '0')}`,
+            date: `${item._id.year}-${String(item._id.month).padStart(2, '0')}-${String(item._id.day).padStart(
+              2,
+              '0'
+            )}`,
             conversionRate: runningTotalUsers > 0 ? (runningActiveSubs / runningTotalUsers) * 100 : 0,
           };
         });
-        historicalUserGrowth = historicalData.map(item => ({
+
+        historicalUserGrowth = historicalData.map((item) => ({
           date: `${item._id.year}-${String(item._id.month).padStart(2, '0')}-${String(item._id.day).padStart(2, '0')}`,
           newUsers: item.newUsers,
         }));
       }
+
       res.json({
         period,
         overview: {
@@ -838,6 +866,7 @@ module.exports = (dependencies) => {
       res.status(500).json({ error: 'Failed to fetch analytics' });
     }
   });
+
   router.get('/api/admin/users', async (req, res) => {
     try {
       const userInfo = getUserInfoFromRequest(req);
@@ -951,6 +980,7 @@ module.exports = (dependencies) => {
       res.status(500).json({ error: 'Failed to fetch users' });
     }
   });
+
   router.get('/api/admin/analytics/revenue', async (req, res) => {
     try {
       const userInfo = getUserInfoFromRequest(req);
@@ -1109,6 +1139,7 @@ module.exports = (dependencies) => {
       res.status(500).json({ error: 'Failed to fetch revenue analytics' });
     }
   });
+
   router.get('/api/admin/analytics/activity', async (req, res) => {
     try {
       const userInfo = getUserInfoFromRequest(req);
@@ -1249,6 +1280,7 @@ module.exports = (dependencies) => {
       res.status(500).json({ error: 'Failed to fetch activity analytics' });
     }
   });
+
   router.get('/api/admin/analytics/mrr-arr', async (req, res) => {
     try {
       const { period = '30d', startDate, endDate } = req.query;
@@ -1270,7 +1302,7 @@ module.exports = (dependencies) => {
           mrr += latestPurchase.amount;
         }
       }
-      const arr = mrr * 12; 
+      const arr = mrr * 12;
       res.json({
         period,
         mrr,
@@ -1280,6 +1312,7 @@ module.exports = (dependencies) => {
       res.status(500).json({ error: 'Failed to fetch MRR and ARR' });
     }
   });
+
   router.get('/api/admin/analytics/churn-rate', async (req, res) => {
     try {
       const { period = '30d', startDate, endDate } = req.query;
@@ -1297,13 +1330,14 @@ module.exports = (dependencies) => {
           : 0;
       res.json({
         period,
-        churnRate: parseFloat(churnRate.toFixed(2)),
+        churnRate: Number.parseFloat(churnRate.toFixed(2)),
         cancellations: cancellationsInPeriod,
       });
     } catch (error) {
       res.status(500).json({ error: 'Failed to fetch churn rate' });
     }
   });
+
   router.get('/api/admin/analytics/ltv-arpu', async (req, res) => {
     try {
       const { period = '30d', startDate, endDate } = req.query;
@@ -1324,19 +1358,18 @@ module.exports = (dependencies) => {
       const arpu = totalUsers > 0 ? totalRevenue / totalUsers : 0;
       const activeSubscriptions = await usersStorage.countDocuments({ isSubscribed: true });
       const churnRate =
-        activeSubscriptions + churnRateData > 0
-          ? (churnRateData / (activeSubscriptions + churnRateData))
-          : 0; 
+        activeSubscriptions + churnRateData > 0 ? churnRateData / (activeSubscriptions + churnRateData) : 0;
       const ltv = churnRate > 0 ? arpu / churnRate : 0;
       res.json({
         period,
-        arpu: parseFloat(arpu.toFixed(2)),
-        ltv: parseFloat(ltv.toFixed(2)),
+        arpu: Number.parseFloat(arpu.toFixed(2)),
+        ltv: Number.parseFloat(ltv.toFixed(2)),
       });
     } catch (error) {
       res.status(500).json({ error: 'Failed to fetch LTV and ARPU' });
     }
   });
+
   router.get('/api/admin/analytics/billing-issues', async (req, res) => {
     try {
       const { period = '30d', startDate, endDate } = req.query;
@@ -1363,7 +1396,7 @@ module.exports = (dependencies) => {
       const refundRate = totalTransactions > 0 ? (refundsCount / totalTransactions) * 100 : 0;
       res.json({
         period,
-        refundRate: parseFloat(refundRate.toFixed(2)),
+        refundRate: Number.parseFloat(refundRate.toFixed(2)),
         refundsCount,
         refundsValue,
         failedPaymentsCount,
@@ -1377,9 +1410,12 @@ module.exports = (dependencies) => {
     try {
       const { period = '30d', startDate, endDate } = req.query;
       const { dateFilter } = getDateFilters(period, startDate, endDate);
-      const allUsersInPeriod = await usersStorage.find(dateFilter).toArray();
-      const cohortsMap = new Map(); 
-      for (const user of allUsersInPeriod) {
+      const usersInPeriod = await usersStorage.find(dateFilter).toArray();
+      if (usersInPeriod.length === 0) {
+        return res.json([]);
+      }
+      const cohortsMap = new Map();
+      for (const user of usersInPeriod) {
         const signupDate = user.createdAt;
         if (signupDate) {
           const cohortMonth = format(signupDate, 'yyyy-MM');
@@ -1392,36 +1428,85 @@ module.exports = (dependencies) => {
       }
       const sortedCohorts = Array.from(cohortsMap.keys()).sort();
       const retentionData = [];
-      const startPeriod = startDate ? new Date(startDate) : new Date(new Date().getTime() - 30 * 24 * 60 * 60 * 1000);
+      const startPeriod = startDate ? new Date(startDate) : new Date(new Date().getTime() - 180 * 24 * 60 * 60 * 1000);
       const endPeriod = endDate ? new Date(endDate) : new Date();
-      const totalMonthsToTrack = differenceInMonths(endPeriod, startPeriod) + 1;
+      const totalMonthsToTrack = Math.min(differenceInMonths(endPeriod, startPeriod) + 1, 12);
       for (const cohortMonth of sortedCohorts) {
         const cohortUsers = cohortsMap.get(cohortMonth).users;
         const initialCohortSize = cohortsMap.get(cohortMonth).count;
         if (initialCohortSize === 0) continue;
-        const cohortRow = { month: cohortMonth, initial: initialCohortSize };
+        const cohortRow = {
+          month: cohortMonth,
+          initial: initialCohortSize,
+          cohortDate: new Date(cohortMonth + '-01'),
+        };
         for (let i = 0; i < totalMonthsToTrack; i++) {
-          const targetMonth = addMonths(new Date(cohortMonth), i);
+          const targetMonth = addMonths(new Date(cohortMonth + '-01'), i);
           const targetMonthStart = startOfMonth(targetMonth);
           const targetMonthEnd = endOfMonth(targetMonth);
-          const activeInMonthCount = await usersStorage.countDocuments({
-            _id: { $in: cohortUsers.map(u => u._id) },
-            isSubscribed: true,
-            createdAt: { $lte: targetMonthEnd },
-            $or: [
-              { subscriptionCancelledAt: { $gte: targetMonthStart } },
-              { subscriptionCancelledAt: { $exists: false } },
-            ],
-          });
+          let activeInMonthCount = 0;
+          for (const user of cohortUsers) {
+            const wasActiveInMonth = await checkUserActiveInMonth(
+              user,
+              targetMonthStart,
+              targetMonthEnd,
+              subscriptionStorage
+            );
+            if (wasActiveInMonth) {
+              activeInMonthCount++;
+            }
+          }
           const retentionPercentage = (activeInMonthCount / initialCohortSize) * 100;
-          cohortRow[`month${i}`] = parseFloat(retentionPercentage.toFixed(2));
+          cohortRow[`month${i}`] = Number.parseFloat(retentionPercentage.toFixed(2));
         }
         retentionData.push(cohortRow);
       }
       res.json(retentionData);
     } catch (error) {
+      console.error('Cohort retention error:', error);
       res.status(500).json({ error: 'Failed to fetch cohort retention data' });
     }
   });
+  async function checkUserActiveInMonth(user, monthStart, monthEnd, subscriptionStorage) {
+    try {
+      if (user.isSubscribed && user.createdAt <= monthEnd) {
+        const cancellation = await subscriptionStorage.findOne(
+          {
+            userEmail: user.userEmail,
+            type: 'cancellation',
+            createdAt: { $lte: monthEnd },
+          },
+          { sort: { createdAt: -1 } }
+        );
+        if (!cancellation) {
+          return true;
+        }
+        const reactivation = await subscriptionStorage.findOne({
+          userEmail: user.userEmail,
+          type: 'reactivation',
+          createdAt: { $gt: cancellation.createdAt, $lte: monthEnd },
+        });
+        return !!reactivation;
+      }
+      const lastSubscriptionEvent = await subscriptionStorage.findOne(
+        {
+          userEmail: user.userEmail,
+          type: { $in: ['purchase', 'reactivation', 'cancellation'] },
+          createdAt: { $lte: monthEnd },
+        },
+        { sort: { createdAt: -1 } }
+      );
+      if (!lastSubscriptionEvent) {
+        return false;
+      }
+      if (lastSubscriptionEvent.type === 'purchase' || lastSubscriptionEvent.type === 'reactivation') {
+        return true;
+      }
+      return false;
+    } catch (error) {
+      console.error('Error checking user activity:', error);
+      return false;
+    }
+  }
   return router;
 };
