@@ -1,7 +1,7 @@
 const express = require('express');
 const { ObjectId } = require('mongodb');
 
-module.exports = ({ ragSystemStorage, auditLogger, getUserInfoFromRequest }) => {
+module.exports = ({ ragSystemStorage, shedToolsStorage, auditLogger, getUserInfoFromRequest }) => {
   const router = express.Router();
 
   router.get('/admin/rag-system', async (req, res) => {
@@ -132,21 +132,15 @@ module.exports = ({ ragSystemStorage, auditLogger, getUserInfoFromRequest }) => 
       res.status(500).json({ error: 'Failed to fetch ordered tools' });
     }
   });
-  // Assuming 'router' and 'ragSystemStorage' (your MongoDB collection object) are already defined and accessible.
-
   router.get('/rag-system/filtered-tools', async (req, res) => {
     try {
-      const { budgetTier, productNames } = req.query;
+      const { budgetTier, productNames, userID } = req.query;
       const initialMatchQuery = { hidden: { $ne: true } };
       if (budgetTier) {
         let budgetTiersToInclude = [];
-        if (budgetTier === 'low') {
-          budgetTiersToInclude = ['low'];
-        } else if (budgetTier === 'medium') {
-          budgetTiersToInclude = ['low', 'medium'];
-        } else if (budgetTier === 'high') {
-          budgetTiersToInclude = ['low', 'medium', 'high', 'premium', 'luxury'];
-        }
+        if (budgetTier === 'low') budgetTiersToInclude = ['low'];
+        else if (budgetTier === 'medium') budgetTiersToInclude = ['low', 'medium'];
+        else if (budgetTier === 'high') budgetTiersToInclude = ['low', 'medium', 'high', 'premium', 'luxury'];
         if (budgetTiersToInclude.length > 0) {
           initialMatchQuery.budgetTier = { $in: budgetTiersToInclude };
         }
@@ -156,8 +150,8 @@ module.exports = ({ ragSystemStorage, auditLogger, getUserInfoFromRequest }) => 
         searchTerms.push(
           ...productNames
             .split(',')
-            .map((term) => term.trim())
-            .filter((term) => term.toLowerCase() !== 'i' && term !== '')
+            .map((t) => t.trim())
+            .filter((t) => t && t.toLowerCase() !== 'i')
         );
       }
       if (searchTerms.length > 0) {
@@ -166,42 +160,64 @@ module.exports = ({ ragSystemStorage, auditLogger, getUserInfoFromRequest }) => 
           { description: { $regex: term, $options: 'i' } },
           { category: { $regex: term, $options: 'i' } },
         ]);
-      } else {
-        delete initialMatchQuery.$or;
       }
-      const pipeline = [];
-      pipeline.push({ $match: initialMatchQuery });
-      let keywordRelevantOrConditions = [];
+      const pipeline = [{ $match: initialMatchQuery }];
       if (searchTerms.length > 0) {
-        keywordRelevantOrConditions = searchTerms.flatMap((term) => [
+        const keywordRelevantOrConditions = searchTerms.flatMap((term) => [
           { $regexMatch: { input: '$name', regex: term, options: 'i' } },
           { $regexMatch: { input: '$description', regex: term, options: 'i' } },
           { $regexMatch: { input: '$category', regex: term, options: 'i' } },
         ]);
-      }
-      pipeline.push({
-        $addFields: {
-          _isBoosted: {
-            $and: [
-              { $eq: ['$boosted', true] },
-              {
-                $or: [{ $eq: ['$boostExpiry', null] }, { $gt: ['$boostExpiry', '$$NOW'] }],
-              },
-            ],
+        pipeline.push({
+          $addFields: {
+            _isBoosted: {
+              $and: [
+                { $eq: ['$boosted', true] },
+                { $or: [{ $eq: ['$boostExpiry', null] }, { $gt: ['$boostExpiry', '$$NOW'] }] },
+              ],
+            },
+            _isKeywordRelevant: { $or: keywordRelevantOrConditions },
           },
-          _isKeywordRelevant: searchTerms.length > 0 ? { $or: keywordRelevantOrConditions } : false,
-        },
+        });
+      } else {
+        pipeline.push({
+          $addFields: {
+            _isBoosted: {
+              $and: [
+                { $eq: ['$boosted', true] },
+                { $or: [{ $eq: ['$boostExpiry', null] }, { $gt: ['$boostExpiry', '$$NOW'] }] },
+              ],
+            },
+            _isKeywordRelevant: false,
+          },
+        });
+      }
+      pipeline.push({ $sort: { _isKeywordRelevant: -1, _isBoosted: -1 } });
+      let results = await ragSystemStorage.aggregate(pipeline).toArray();
+      let removedTools = [];
+      if (userID) {
+        const shedTools = await shedToolsStorage.find({ user_id: userID }).toArray();
+        const shedToolNames = new Set(shedTools.map((t) => t.tool_name?.toLowerCase()));
+        const filteredResults = [];
+        for (const tool of results) {
+          const words = tool.name.split(' ').map((w) => w.toLowerCase());
+          const firstWord = words[0] || '';
+          const secondWord = words[1] || '';
+          if (shedToolNames.has(firstWord) || shedToolNames.has(secondWord)) {
+            removedTools.push(tool.name);
+          } else {
+            filteredResults.push(tool);
+          }
+        }
+        results = filteredResults;
+      }
+      results = results.slice(0, 5);
+      res.json({
+        finalTools: results,
+        removedTools: removedTools,
       });
-      pipeline.push({
-        $sort: {
-          _isKeywordRelevant: -1,
-          _isBoosted: -1,
-        },
-      });
-      pipeline.push({ $limit: 5 });
-      const finalOrderedTools = await ragSystemStorage.aggregate(pipeline).toArray();
-      res.json(finalOrderedTools);
     } catch (error) {
+      console.error(error);
       res.status(500).json({ error: 'Failed to fetch filtered tools' });
     }
   });
