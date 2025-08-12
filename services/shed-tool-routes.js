@@ -39,14 +39,12 @@ module.exports = ({ shedToolsStorage, auditLogger, getUserInfoFromRequest }) => 
         note: "",
       }
       const result = await shedToolsStorage.insertOne(toolData)
-
-      // Log audit for shed tool addition
       await auditLogger.logAudit({
         action: "CREATE",
         resource: "shed_tool",
         resourceId: result.insertedId.toString(),
         userId: userId,
-        userEmail: userId, // Using userId as email identifier
+        userEmail: userId,
         role: "user",
         newData: toolData,
         metadata: {
@@ -156,7 +154,6 @@ module.exports = ({ shedToolsStorage, auditLogger, getUserInfoFromRequest }) => 
   router.get("/shed/:userId", async (req, res) => {
     try {
       const { userId } = req.params
-
       const tools = await shedToolsStorage
         .find({
           user_id: userId,
