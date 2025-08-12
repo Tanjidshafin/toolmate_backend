@@ -196,7 +196,7 @@ module.exports = ({ ragSystemStorage, shedToolsStorage, auditLogger, getUserInfo
       let results = await ragSystemStorage.aggregate(pipeline).toArray();
       let removedTools = [];
       if (userID) {
-        const shedTools = await shedToolsStorage.find({ user_id: userID }).toArray();
+        const shedTools = await shedToolsStorage.find({ user_id: userID, action: 'tool_added' }).toArray();
         const shedToolNames = new Set(shedTools.map((t) => t.tool_name?.toLowerCase()));
         const filteredResults = [];
         for (const tool of results) {
