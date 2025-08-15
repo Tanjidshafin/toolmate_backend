@@ -12,14 +12,12 @@ module.exports = (dependencies) => {
       const query = {
         userEmail: userEmail,
       }
-
       const logs = await chatLogsStorage
         .find(query)
         .sort({ timestamp: -1 })
         .skip(skip)
         .limit(Number.parseInt(limit))
         .toArray()
-
       const total = await chatLogsStorage.countDocuments(query)
       const sessionGroups = {}
       const sessionIds = [...new Set(logs.map((log) => log.sessionId))]
@@ -44,7 +42,6 @@ module.exports = (dependencies) => {
         ipAddress: userInfo.ipAddress,
         userAgent: userInfo.userAgent,
       })
-
       res.send({
         success: true,
         ...sessionGroups,
@@ -116,7 +113,6 @@ module.exports = (dependencies) => {
         ipAddress: userInfo.ipAddress,
         userAgent: userInfo.userAgent,
       })
-
       res.json({
         jobLogs: enrichedLogs,
         pagination: {
@@ -135,23 +131,18 @@ module.exports = (dependencies) => {
       const { id } = req.params
       const { notes } = req.body
       const userInfo = getUserInfoFromRequest(req)
-
       if (!ObjectId.isValid(id)) {
         return res.status(400).json({ error: "Invalid job log ID format" })
       }
-
       const existingLog = await chatLogsStorage.findOne({ _id: new ObjectId(id) })
       if (!existingLog) {
         return res.status(404).json({ error: "Job log not found" })
       }
-
       const updateData = {
         "metadata.notes": notes,
         updatedAt: new Date(),
       }
-
       const result = await chatLogsStorage.updateOne({ _id: new ObjectId(id) }, { $set: updateData })
-
       if (result.matchedCount === 0) {
         return res.status(404).json({ error: "Job log not found or not updated" })
       }
@@ -171,7 +162,6 @@ module.exports = (dependencies) => {
         ipAddress: userInfo.ipAddress,
         userAgent: userInfo.userAgent,
       })
-
       res.json({ success: true, message: "Job log notes updated successfully" })
     } catch (error) {
       console.error("Error updating job log notes:", error)
