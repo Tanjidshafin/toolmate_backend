@@ -11,7 +11,6 @@ module.exports = ({
   io,
 }) => {
   const router = express.Router()
-
   router.get("/admin/rag-system", async (req, res) => {
     try {
       const ragSettings = await ragSystemStorage.find({}).toArray()
@@ -83,7 +82,7 @@ module.exports = ({
       let boostExpiry = null
       if (boosted && duration) {
         boostExpiry = new Date()
-        boostExpiry.setHours(boostExpiry.getHours() + duration)
+        boostExpiry.setMilliseconds(boostExpiry.getMilliseconds() + duration * 60 * 60 * 1000)
       }
       const updateData = {
         id,
@@ -96,13 +95,27 @@ module.exports = ({
         updateData.promoExpiry = new Date(promoExpiry)
       }
       await ragSystemStorage.updateOne({ id }, { $set: updateData }, { upsert: true })
+
       io.to("admin-monitoring").emit("tool-boost-updated", {
         toolId: id,
         boosted,
         boostExpiry,
         promoExpiry,
         timestamp: new Date(),
+        toolName: existingTool?.name || id,
+        duration: duration || null,
+        action: boosted ? "boosted" : "unboosted",
+        remainingTime: boostExpiry ? boostExpiry.getTime() - new Date().getTime() : null,
       })
+
+      io.emit("boost-status-changed", {
+        toolId: id,
+        toolName: existingTool?.name || id,
+        boosted,
+        boostExpiry,
+        timestamp: new Date(),
+      })
+
       await auditLogger.logAudit({
         action: "UPDATE",
         resource: "rag_tool_boost",
@@ -121,7 +134,7 @@ module.exports = ({
         },
         ...userInfo,
       })
-      res.json({ success: true, message: "Tool boost updated" })
+      res.json({ success: true, message: "Tool boost updated", boostExpiry })
     } catch (error) {
       console.error("Error updating tool boost:", error)
       res.status(500).json({ error: "Failed to update tool boost" })
