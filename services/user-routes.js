@@ -137,6 +137,9 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
             const nameParts = userName.split(" ")
             clerkUpdates.firstName = nameParts[0] || userName
             clerkUpdates.lastName = nameParts.slice(1).join(" ") || ""
+            if (userName !== existingUser.userName) {
+              await emailTriggers.triggerNameChangedEmail(email, userName, existingUser.userName, userName)
+            }
           }
           if (userEmail && userEmail !== email) {
             try {
@@ -160,6 +163,12 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
                   }
                 }
               }
+              await emailTriggers.triggerEmailChangedEmail(
+                userEmail,
+                userName || existingUser.userName,
+                email,
+                userEmail,
+              )
             } catch (emailError) {
               console.error("❌ Email update failed:", emailError)
             }
@@ -174,7 +183,7 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
               if (db) {
                 name = db.userName
               }
-              await emailTriggers.triggerPasswordResetSuccessEmail(email, name)
+              await emailTriggers.triggerPasswordChangedEmail(email, name)
             } catch (passwordError) {
               console.error("❌ Password update failed:", passwordError)
               throw new Error(`Password update failed: ${passwordError.message}`)
@@ -187,16 +196,33 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
                 banned: isBanned,
               })
               let name = "user"
-              let alertType = ""
               const db = await usersStorage.findOne({ userEmail: email })
               if (db) {
                 name = db.userName
-                alertType = !db?.isBanned ? "account_banned" : "account_unbanned"
               }
-              await emailTriggers.triggerSystemAlert(email, name, alertType)
+              if (isBanned) {
+                await emailTriggers.triggerUserBannedEmail(email, name)
+              } else {
+                await emailTriggers.triggerUserUnbannedEmail(email, name)
+              }
             } catch (banError) {
               throw new Error(`Ban status update failed: ${banError.message}`)
             }
+          }
+          if (role !== undefined && role !== existingUser.role) {
+            await emailTriggers.triggerRoleChangedEmail(
+              email,
+              userName || existingUser.userName,
+              existingUser.role,
+              role,
+            )
+          }
+          if (isSubscribed !== undefined && isSubscribed === true && existingUser.isSubscribed !== true) {
+            await emailTriggers.triggerSubscriptionGiftedEmail(
+              email,
+              userName || existingUser.userName,
+              "Toolmate Admin",
+            )
           }
           if (Object.keys(clerkUpdates).length > 0) {
             await clerkClient.users.updateUser(clerkId, clerkUpdates)
@@ -269,7 +295,10 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
             },
           },
         )
-
+        const user = await usersStorage.findOne({ userEmail: email })
+        if (user) {
+          await emailTriggers.triggerPasswordChangedEmail(email, user.userName)
+        }
         // Log audit for password update by admin
         await auditLogger.logAudit({
           action: "UPDATE_PASSWORD",
@@ -333,6 +362,14 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
         )
         if (result.matchedCount === 0) {
           return res.status(404).json({ error: "User not found in database" })
+        }
+        const user = await usersStorage.findOne({ userEmail: email })
+        if (user) {
+          if (banned) {
+            await emailTriggers.triggerUserBannedEmail(email, user.userName)
+          } else {
+            await emailTriggers.triggerUserUnbannedEmail(email, user.userName)
+          }
         }
         // Log audit for ban/unban action
         await auditLogger.logAudit({
@@ -434,6 +471,9 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
       }
       if (userName !== undefined) {
         updateData.userName = userName
+        if (userName !== user.userName) {
+          await emailTriggers.triggerNameChangedEmail(userEmail, userName, user.userName, userName)
+        }
       }
       if (user.clerkId && userName !== undefined) {
         const clerkUpdates = {}
@@ -477,6 +517,66 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
       res.status(500).json({ error: "Failed to update user profile" })
     }
   })
+
+  router.post("/admin/users/:email/gift-subscription", async (req, res) => {
+    try {
+      const { email } = req.params
+      const { giftedBy = "Toolmate Admin" } = req.body
+      const userInfo = getUserInfoFromRequest(req)
+
+      const user = await usersStorage.findOne({ userEmail: email })
+      if (!user) {
+        return res.status(404).json({ error: "User not found" })
+      }
+
+      const result = await usersStorage.updateOne(
+        { userEmail: email },
+        {
+          $set: {
+            isSubscribed: true,
+            subscriptionGiftedAt: new Date(),
+            subscriptionGiftedBy: giftedBy,
+            updatedAt: new Date(),
+          },
+        },
+      )
+
+      if (result.matchedCount === 0) {
+        return res.status(404).json({ error: "User not found in database" })
+      }
+
+      await emailTriggers.triggerSubscriptionGiftedEmail(email, user.userName, giftedBy)
+
+      await auditLogger.logAudit({
+        action: "GIFT_SUBSCRIPTION",
+        resource: "user",
+        resourceId: user._id.toString(),
+        userId: "admin",
+        userEmail: "admin@toolmate.com",
+        role: "admin",
+        newData: {
+          isSubscribed: true,
+          subscriptionGiftedAt: new Date(),
+          subscriptionGiftedBy: giftedBy,
+        },
+        metadata: {
+          targetUser: email,
+          giftedBy,
+          adminAction: true,
+        },
+        ...userInfo,
+      })
+
+      res.json({
+        message: "Subscription gifted successfully",
+        giftedBy,
+      })
+    } catch (error) {
+      console.error("❌ Error gifting subscription:", error)
+      res.status(500).json({ error: "Failed to gift subscription" })
+    }
+  })
+
   router.post("/admin/post/email", async (req, res) => {
     try {
       const { userName, userEmail, message, subject } = req.body
