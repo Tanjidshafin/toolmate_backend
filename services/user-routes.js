@@ -550,6 +550,64 @@ Matey from ToolMate
       return res.status(500).json({ error: 'Internal server error. Please try again later.' });
     }
   });
-
+  
+  router.get('/user/:email/limits', async (req, res) => {
+    try {
+      const { email } = req.params;
+      const user = await usersStorage.findOne({ userEmail: email });
+      if (!user) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+      const today = new Date().toDateString();
+      if (user.lastLimitReset !== today) {
+        const updateData = {
+          dailyMessageCount: 0,
+          dailyImageUploadCount: 0,
+          lastLimitReset: today,
+          updatedAt: new Date(),
+        };
+        await usersStorage.updateOne({ userEmail: email }, { $set: updateData });
+        return res.json({ dailyMessageCount: 0, dailyImageUploadCount: 0 });
+      }
+      res.json({
+        dailyMessageCount: user.dailyMessageCount || 0,
+        dailyImageUploadCount: user.dailyImageUploadCount || 0,
+      });
+    } catch (error) {
+      console.error('Error fetching user limits:', error);
+      res.status(500).json({ error: 'Failed to fetch user limits' });
+    }
+  });
+  router.put('/user/:email/limits', async (req, res) => {
+    try {
+      const { email } = req.params;
+      const { incrementMessage, incrementImageUpload } = req.body;
+      const today = new Date().toDateString();
+      const user = await usersStorage.findOne({ userEmail: email });
+      if (!user) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+      let updateData = { updatedAt: new Date() };
+      if (user.lastLimitReset !== today) {
+        updateData.dailyMessageCount = 0;
+        updateData.dailyImageUploadCount = 0;
+        updateData.lastLimitReset = today;
+      }
+      if (incrementMessage) {
+        updateData.dailyMessageCount = (user.lastLimitReset === today ? user.dailyMessageCount || 0 : 0) + 1;
+      }
+      if (incrementImageUpload) {
+        updateData.dailyImageUploadCount = (user.lastLimitReset === today ? user.dailyImageUploadCount || 0 : 0) + 1;
+      }
+      await usersStorage.updateOne({ userEmail: email }, { $set: updateData });
+      res.json({
+        dailyMessageCount: updateData.dailyMessageCount || user.dailyMessageCount || 0,
+        dailyImageUploadCount: updateData.dailyImageUploadCount || user.dailyImageUploadCount || 0,
+      });
+    } catch (error) {
+      console.error('Error updating user limits:', error);
+      res.status(500).json({ error: 'Failed to update user limits' });
+    }
+  });
   return router;
 };
