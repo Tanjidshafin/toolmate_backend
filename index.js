@@ -243,12 +243,73 @@ async function run() {
           console.error("Error handling boost timer expired:", error)
         }
       })
-
       socket.on("disconnect", (reason) => {
         console.log("❌ Admin disconnected from monitoring:", socket.id, "Reason:", reason)
       })
     })
+    cron.schedule("*/1 * * * *", async () => {
+      try {
+        const now = new Date()
+        const todayDateString = now.toDateString()
+        const usersNeedingReset = await usersStorage
+          .find({
+            $or: [{ lastLimitReset: { $ne: todayDateString } }, { lastLimitReset: { $exists: false } }],
+          })
+          .toArray()
+        if (usersNeedingReset.length > 0) {
+          await usersStorage.updateMany(
+            {
+              $or: [{ lastLimitReset: { $ne: todayDateString } }, { lastLimitReset: { $exists: false } }],
+            },
+            {
+              $set: {
+                dailyMessageCount: 0,
+                dailyImageUploadCount: 0,
+                lastLimitReset: todayDateString,
+                updatedAt: now,
+              },
+            },
+          )
+          for (const user of usersNeedingReset) {
+            await auditLogger.logAudit({
+              action: "DAILY_LIMIT_RESET",
+              resource: "user_limits",
+              resourceId: user._id.toString(),
+              userId: "system",
+              userEmail: "system@toolmate.com",
+              role: "system",
+              oldData: {
+                dailyMessageCount: user.dailyMessageCount || 0,
+                dailyImageUploadCount: user.dailyImageUploadCount || 0,
+                lastLimitReset: user.lastLimitReset,
+              },
+              newData: {
+                dailyMessageCount: 0,
+                dailyImageUploadCount: 0,
+                lastLimitReset: todayDateString,
+              },
+              metadata: {
+                userEmail: user.userEmail,
+                automaticReset: true,
+                resetAt: now,
+              },
+            })
+          }
+          io.to("admin-monitoring").emit("daily-limits-reset", {
+            resetUsers: usersNeedingReset.map((u) => ({
+              email: u.userEmail,
+              name: u.userName || "Unknown",
+            })),
+            timestamp: now,
+            count: usersNeedingReset.length,
+          })
 
+          console.log(`🔄 Reset daily limits for ${usersNeedingReset.length} users at ${now.toISOString()}`)
+        }
+      } catch (error) {
+        console.error("Error in daily limit reset cron job:", error)
+      }
+    })
     cron.schedule("*/1 * * * *", async () => {
       try {
         const now = new Date()
@@ -287,7 +348,6 @@ async function run() {
               },
             })
           }
-
           io.to("admin-monitoring").emit("boost-expired", {
             expiredTools: expiredBoosts.map((t) => ({ id: t.id, name: t.name })),
             timestamp: now,
