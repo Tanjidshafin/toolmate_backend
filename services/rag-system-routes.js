@@ -278,7 +278,6 @@ module.exports = ({
     try {
       const { risk_level, productNames, userID } = req.query;
       console.log('Query params:', { risk_level, productNames, userID });
-
       const initialMatchQuery = {
         hidden: { $ne: true },
         suppressed: { $ne: true },
@@ -406,7 +405,6 @@ module.exports = ({
         resultCount: finalTools.length,
         removedToolsCount: removedTools.length,
       });
-
       res.json({
         finalTools,
         removedTools,
