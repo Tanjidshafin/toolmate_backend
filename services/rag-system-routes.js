@@ -11,21 +11,37 @@ module.exports = ({
   io,
 }) => {
   const router = express.Router()
+
   router.get("/admin/rag-system", async (req, res) => {
     try {
-      const ragSettings = await ragSystemStorage.find({}).toArray()
+      const { page = 1, limit = 10 } = req.query
+      const skip = (Number.parseInt(page) - 1) * Number.parseInt(limit)
+
+      const totalCount = await ragSystemStorage.countDocuments({})
+      const ragSettings = await ragSystemStorage.find({}).skip(skip).limit(Number.parseInt(limit)).toArray()
+
       await toolAnalyticsStorage.insertOne({
         type: "admin_access",
         resource: "rag_system",
         timestamp: new Date(),
         userInfo: getUserInfoFromRequest(req),
       })
-      res.json(ragSettings)
+
+      res.json({
+        data: ragSettings,
+        pagination: {
+          currentPage: Number.parseInt(page),
+          totalPages: Math.ceil(totalCount / Number.parseInt(limit)),
+          totalItems: totalCount,
+          itemsPerPage: Number.parseInt(limit),
+        },
+      })
     } catch (error) {
       console.error("Error fetching RAG settings:", error)
       res.status(500).json({ error: "Failed to fetch RAG settings" })
     }
   })
+
   router.put("/admin/rag-system/tool/:id/visibility", async (req, res) => {
     try {
       const { id } = req.params
@@ -140,23 +156,35 @@ module.exports = ({
       res.status(500).json({ error: "Failed to update tool boost" })
     }
   })
+
   router.put("/admin/rag-system/tool/:id/details", async (req, res) => {
     try {
       const { id } = req.params
-      const { name, description, category, toolType, tier, risk, pricing, updatedBy } = req.body
+      const { name, description, category, budgetTier, toolType, pricing, updatedBy } = req.body
       const userInfo = getUserInfoFromRequest(req)
       const existingTool = await ragSystemStorage.findOne({ id })
       const updateData = {
         updatedAt: new Date(),
         updatedBy: updatedBy || "admin",
       }
-      if (name !== undefined) updateData.name = name
-      if (description !== undefined) updateData.description = description
-      if (category !== undefined) updateData.category = category
+      if (name !== undefined) updateData.product_name = name
+      if (name !== undefined) updateData.display_name = name
+      if (description !== undefined) updateData.product_type = description
+      if (category !== undefined) updateData.retailer = category
       if (toolType !== undefined) updateData.toolType = toolType
-      if (tier !== undefined) updateData.tier = tier
-      if (risk !== undefined) updateData.risk = risk
+      if (budgetTier !== undefined) {
+        const riskLevelMap = {
+          low: "Low",
+          medium: "Medium",
+          hard: "Hard",
+          Low: "Low",
+          Medium: "Medium",
+          Hard: "Hard",
+        }
+        updateData.risk_level = riskLevelMap[budgetTier] || budgetTier
+      }
       if (pricing !== undefined) updateData.pricing = pricing
+
       await ragSystemStorage.updateOne({ id }, { $set: updateData })
       io.to("admin-monitoring").emit("tool-details-updated", {
         toolId: id,
@@ -185,6 +213,7 @@ module.exports = ({
       res.status(500).json({ error: "Failed to update tool details" })
     }
   })
+
   router.get("/rag-system/boosted-tools", async (req, res) => {
     try {
       const boostedTools = await ragSystemStorage
@@ -228,39 +257,25 @@ module.exports = ({
       res.status(500).json({ error: "Failed to fetch ordered tools" })
     }
   })
+
   router.get("/rag-system/filtered-tools", async (req, res) => {
     try {
-      const { budgetTier, productNames, userID, toolType, tier, risk, devOverride } = req.query
-      let isDevOverride = false
-      if (devOverride && process.env.NODE_ENV !== "production") {
-        const override = await devTestOverrideStorage.findOne({
-          overrideKey: devOverride,
-          active: true,
-          expiresAt: { $gt: new Date() },
-        })
-        isDevOverride = !!override
-      }
+      const { risk_level, productNames, userID } = req.query
+      console.log("Query params:", { risk_level, productNames, userID })
+
       const initialMatchQuery = {
         hidden: { $ne: true },
         suppressed: { $ne: true },
       }
-      if (toolType) {
-        initialMatchQuery.toolType = { $in: toolType.split(",") }
-      }
-      if (tier) {
-        initialMatchQuery.tier = { $in: tier.split(",") }
-      }
-      if (risk) {
-        initialMatchQuery.risk = { $in: risk.split(",") }
-      }
-      if (budgetTier) {
-        let budgetTiersToInclude = []
-        if (budgetTier === "low") budgetTiersToInclude = ["low"]
-        else if (budgetTier === "medium") budgetTiersToInclude = ["low", "medium"]
-        else if (budgetTier === "high") budgetTiersToInclude = ["low", "medium", "high", "premium", "luxury"]
 
-        if (budgetTiersToInclude.length > 0) {
-          initialMatchQuery.budgetTier = { $in: budgetTiersToInclude }
+      if (risk_level) {
+        let riskLevelsToInclude = []
+        if (risk_level === "Low") riskLevelsToInclude = ["Low"]
+        else if (risk_level === "Medium") riskLevelsToInclude = ["Low", "Medium"]
+        else if (risk_level === "Hard") riskLevelsToInclude = ["Low", "Medium", "Hard"]
+
+        if (riskLevelsToInclude.length > 0) {
+          initialMatchQuery.risk_level = { $in: riskLevelsToInclude }
         }
       }
       const searchTerms = []
@@ -274,17 +289,17 @@ module.exports = ({
       }
       if (searchTerms.length > 0) {
         initialMatchQuery.$or = searchTerms.flatMap((term) => [
-          { name: { $regex: term, $options: "i" } },
-          { description: { $regex: term, $options: "i" } },
-          { category: { $regex: term, $options: "i" } },
+          { product_name: { $regex: term, $options: "i" } },
+          { product_type: { $regex: term, $options: "i" } },
+          { retailer: { $regex: term, $options: "i" } },
         ])
       }
       const pipeline = [{ $match: initialMatchQuery }]
       if (searchTerms.length > 0) {
         const keywordRelevantOrConditions = searchTerms.flatMap((term) => [
-          { $regexMatch: { input: "$name", regex: term, options: "i" } },
-          { $regexMatch: { input: "$description", regex: term, options: "i" } },
-          { $regexMatch: { input: "$category", regex: term, options: "i" } },
+          { $regexMatch: { input: "$product_name", regex: term, options: "i" } },
+          { $regexMatch: { input: "$product_type", regex: term, options: "i" } },
+          { $regexMatch: { input: "$retailer", regex: term, options: "i" } },
         ])
         pipeline.push({
           $addFields: {
@@ -316,13 +331,11 @@ module.exports = ({
           },
         })
       }
-
       pipeline.push({
         $sort: {
           _isKeywordRelevant: -1,
           _isBoosted: -1,
           _hasActivePromo: -1,
-          tier: 1,
         },
       })
       let results = await ragSystemStorage.aggregate(pipeline).toArray()
@@ -334,26 +347,27 @@ module.exports = ({
         const shedToolNames = new Set(shedTools.map((t) => t.tool_name?.toLowerCase()))
         const filteredResults = []
         for (const tool of results) {
-          const words = tool.name.split(" ").map((w) => w.toLowerCase())
+          const words = tool.product_name.split(" ").map((w) => w.toLowerCase())
           const firstWord = words[0] || ""
           const secondWord = words[1] || ""
-
           if (shedToolNames.has(firstWord) || shedToolNames.has(secondWord)) {
-            removedTools.push(tool.name)
+            removedTools.push(tool.product_name)
           } else {
             filteredResults.push(tool)
           }
         }
         results = filteredResults
       }
+
       let finalTools = []
       if (results.length > 0) {
         const grouped = {}
         results.forEach((tool) => {
-          const key = tool.category || "general"
+          const key = tool.retailer || "general"
           if (!grouped[key]) grouped[key] = []
           grouped[key].push(tool)
         })
+
         Object.values(grouped).forEach((group) => {
           if (group.length >= 3) {
             finalTools.push(...group.slice(0, 3))
@@ -363,18 +377,20 @@ module.exports = ({
             finalTools.push(...group)
           }
         })
-        finalTools = finalTools.slice(0, isDevOverride ? 10 : 5)
+
+        finalTools = finalTools.slice(0, 5)
       }
+
       await toolAnalyticsStorage.insertOne({
         type: "filtered_search",
         timestamp: new Date(),
-        filters: { budgetTier, toolType, tier, risk },
+        filters: { risk_level },
         searchTerms,
         userID,
         resultCount: finalTools.length,
         removedToolsCount: removedTools.length,
-        devOverride: isDevOverride,
       })
+
       res.json({
         finalTools,
         removedTools,
@@ -383,14 +399,14 @@ module.exports = ({
           filteredByUser: removedTools.length,
           finalCount: finalTools.length,
           goodBetterBest: finalTools.length > 1,
-          devOverride: isDevOverride,
         },
       })
     } catch (error) {
-      console.error(error)
+      console.error("Error in filtered-tools:", error)
       res.status(500).json({ error: "Failed to fetch filtered tools" })
     }
   })
+
   router.get("/admin/rag-system/analytics", async (req, res) => {
     try {
       const { startDate, endDate, type } = req.query

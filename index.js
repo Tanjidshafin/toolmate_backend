@@ -79,7 +79,7 @@ async function run() {
     flaggedMessagesStorage = client.db("Toolmate").collection("FlaggedMessages")
     sessionsStorage = client.db("Toolmate").collection("Sessions")
     redirectTrackingStorage = client.db("Toolmate").collection("RedirectTracking")
-    ragSystemStorage = client.db("Toolmate").collection("RagSystemStorage")
+    ragSystemStorage = client.db("Toolmate").collection("RagTools")
     chatLogsStorage = client.db("Toolmate").collection("ChatLogsStorage")
     shedToolsStorage = client.db("Toolmate").collection("ShedTools")
     emailLogsStorage = client.db("Toolmate").collection("EmailLogs")
