@@ -364,8 +364,8 @@ module.exports = ({
         const filteredResults = [];
         for (const tool of results) {
           const words = tool.product_name.split(' ').map((w) => w.toLowerCase());
-          const firstWord = words[0] || '';
-          const secondWord = words[1] || '';
+          const firstWord = words[1] || '';
+          const secondWord = words[2] || '';
           if (shedToolNames.has(firstWord) || shedToolNames.has(secondWord)) {
             removedTools.push(tool.product_name);
           } else {
