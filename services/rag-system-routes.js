@@ -278,6 +278,7 @@ module.exports = ({
     try {
       const { risk_level, productNames, userID } = req.query;
       console.log('Query params:', { risk_level, productNames, userID });
+
       const initialMatchQuery = {
         hidden: { $ne: true },
         suppressed: { $ne: true },
@@ -293,6 +294,7 @@ module.exports = ({
           initialMatchQuery.risk_level = { $in: riskLevelsToInclude };
         }
       }
+
       const searchTerms = [];
       if (productNames) {
         searchTerms.push(
@@ -302,6 +304,7 @@ module.exports = ({
             .filter((t) => t && t.toLowerCase() !== 'i')
         );
       }
+
       if (searchTerms.length > 0) {
         initialMatchQuery.$or = searchTerms.flatMap((term) => [
           { product_name: { $regex: term, $options: 'i' } },
@@ -309,13 +312,19 @@ module.exports = ({
           { retailer: { $regex: term, $options: 'i' } },
         ]);
       }
-      const pipeline = [{ $match: initialMatchQuery }];
+
+      const pipeline = [
+        { $match: initialMatchQuery },
+        { $limit: 1000 }, // Reasonable limit before sorting
+      ];
+
       if (searchTerms.length > 0) {
         const keywordRelevantOrConditions = searchTerms.flatMap((term) => [
           { $regexMatch: { input: '$product_name', regex: term, options: 'i' } },
           { $regexMatch: { input: '$product_type', regex: term, options: 'i' } },
           { $regexMatch: { input: '$retailer', regex: term, options: 'i' } },
         ]);
+
         pipeline.push({
           $addFields: {
             _isBoosted: {
@@ -346,6 +355,7 @@ module.exports = ({
           },
         });
       }
+
       pipeline.push({
         $sort: {
           _isKeywordRelevant: -1,
@@ -353,18 +363,30 @@ module.exports = ({
           _hasActivePromo: -1,
         },
       });
-      let results = await ragSystemStorage.aggregate(pipeline).toArray();
+
+      pipeline.push({ $limit: 100 });
+
+      let results = await ragSystemStorage
+        .aggregate(pipeline, {
+          allowDiskUse: true,
+          maxTimeMS: 30000, // 30 second timeout
+        })
+        .toArray();
+
       const removedTools = [];
       if (userID) {
         const shedTools = await shedToolsStorage
           .find({ user_id: userID, collection: { $ne: 'shed_analytics' } })
           .toArray();
+
         const shedToolNames = new Set(shedTools.map((t) => t.tool_name?.toLowerCase()));
         const filteredResults = [];
+
         for (const tool of results) {
           const words = tool.product_name.split(' ').map((w) => w.toLowerCase());
           const firstWord = words[1] || '';
           const secondWord = words[2] || '';
+
           if (shedToolNames.has(firstWord) || shedToolNames.has(secondWord)) {
             removedTools.push(tool.product_name);
           } else {
@@ -373,45 +395,42 @@ module.exports = ({
         }
         results = filteredResults;
       }
-      // a diversification algorithm to select tools from different brands while ensuring a maximum of 5 tools in the final result
 
       let finalTools = [];
       if (results.length > 0) {
         const grouped = {};
         results.forEach((tool) => {
-          const key = tool.retailer || 'general';
+          const key = tool.brand || 'general';
           if (!grouped[key]) grouped[key] = [];
           grouped[key].push(tool);
         });
 
+        // First, take one tool from each brand
         Object.values(grouped).forEach((group) => {
-          if (group.length >= 3) {
-            finalTools.push(...group.slice(0, 3));
-          } else if (group.length >= 2) {
-            finalTools.push(...group.slice(0, 2));
-          } else {
-            finalTools.push(...group);
+          if (group.length > 0 && finalTools.length < 5) {
+            finalTools.push(group[0]);
           }
         });
+
+        // If we still need more tools to reach 5, add more from existing brands
+        if (finalTools.length < 5) {
+          const remainingTools = [];
+          Object.values(grouped).forEach((group) => {
+            // Skip the first tool since we already added it
+            for (let i = 1; i < group.length; i++) {
+              remainingTools.push(group[i]);
+            }
+          });
+
+          // Add remaining tools until we have 5 total
+          const needed = 5 - finalTools.length;
+          finalTools = finalTools.concat(remainingTools.slice(0, needed));
+        }
+
+        // Ensure we never exceed 5 tools
         finalTools = finalTools.slice(0, 5);
       }
 
-      // to show tools from different brands only (no repeated brands)
-      // let finalTools = [];
-      // if (results.length > 0) {
-      //   const grouped = {};
-      //   results.forEach((tool) => {
-      //     const key = tool.brand || 'general';
-      //     if (!grouped[key]) grouped[key] = [];
-      //     grouped[key].push(tool);
-      //   });
-      //   Object.values(grouped).forEach((group) => {
-      //     if (group.length > 0) {
-      //       finalTools.push(group[0]);
-      //     }
-      //   });
-      //   finalTools = finalTools.slice(0, 5);
-      // }
       await toolAnalyticsStorage.insertOne({
         type: 'filtered_search',
         timestamp: new Date(),
@@ -421,6 +440,7 @@ module.exports = ({
         resultCount: finalTools.length,
         removedToolsCount: removedTools.length,
       });
+
       res.json({
         finalTools,
         removedTools,
