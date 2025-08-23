@@ -375,6 +375,28 @@ module.exports = ({
       }
       // a diversification algorithm to select tools from different brands while ensuring a maximum of 5 tools in the final result
 
+      let finalTools = [];
+      if (results.length > 0) {
+        const grouped = {};
+        results.forEach((tool) => {
+          const key = tool.retailer || 'general';
+          if (!grouped[key]) grouped[key] = [];
+          grouped[key].push(tool);
+        });
+
+        Object.values(grouped).forEach((group) => {
+          if (group.length >= 3) {
+            finalTools.push(...group.slice(0, 3));
+          } else if (group.length >= 2) {
+            finalTools.push(...group.slice(0, 2));
+          } else {
+            finalTools.push(...group);
+          }
+        });
+        finalTools = finalTools.slice(0, 5);
+      }
+
+      // to show tools from different brands only (no repeated brands)
       // let finalTools = [];
       // if (results.length > 0) {
       //   const grouped = {};
@@ -383,35 +405,13 @@ module.exports = ({
       //     if (!grouped[key]) grouped[key] = [];
       //     grouped[key].push(tool);
       //   });
-
       //   Object.values(grouped).forEach((group) => {
-      //     if (group.length >= 3) {
-      //       finalTools.push(...group.slice(0, 3));
-      //     } else if (group.length >= 2) {
-      //       finalTools.push(...group.slice(0, 2));
-      //     } else {
-      //       finalTools.push(...group);
+      //     if (group.length > 0) {
+      //       finalTools.push(group[0]);
       //     }
       //   });
       //   finalTools = finalTools.slice(0, 5);
       // }
-
-      // to show tools from different brands only (no repeated brands)
-      let finalTools = [];
-      if (results.length > 0) {
-        const grouped = {};
-        results.forEach((tool) => {
-          const key = tool.brand || 'general';
-          if (!grouped[key]) grouped[key] = [];
-          grouped[key].push(tool);
-        });
-        Object.values(grouped).forEach((group) => {
-          if (group.length > 0) {
-            finalTools.push(group[0]);
-          }
-        });
-        finalTools = finalTools.slice(0, 5);
-      }
       await toolAnalyticsStorage.insertOne({
         type: 'filtered_search',
         timestamp: new Date(),
