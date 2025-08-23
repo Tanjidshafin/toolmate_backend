@@ -361,7 +361,10 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
           },
         )
         if (result.matchedCount === 0) {
-          return res.status(404).json({ error: "User not found in database" })
+          return res.status(404).json({
+            error: "User not found in database",
+            success: false,
+          })
         }
         const user = await usersStorage.findOne({ userEmail: email })
         if (user) {
@@ -385,14 +388,20 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
           },
           metadata: {
             targetUser: email,
+            permitStatus: banned,
             adminAction: true,
           },
           ...userInfo,
         })
 
         res.json({
+          success: true,
           message: `User ${banned ? "banned" : "unbanned"} successfully`,
-          banned: banned,
+          data: {
+            userEmail: email,
+            isBanned: banned,
+            updatedAt: new Date(), // Corrected variable name
+          },
         })
       } catch (clerkError) {
         console.error("❌ Clerk ban update error:", clerkError)
@@ -403,7 +412,10 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
       }
     } catch (error) {
       console.error("❌ Error updating ban status:", error)
-      res.status(500).json({ error: "Failed to update ban status" })
+      res.status(500).json({
+        error: "Failed to update ban status",
+        success: false,
+      })
     }
   })
   router.delete("/admin/users/:email", async (req, res) => {
@@ -714,5 +726,82 @@ Matey from ToolMate
       res.status(500).json({ error: "Failed to update user limits" })
     }
   })
+  router.put("/admin/users/:email/permit", async (req, res) => {
+    try {
+      const { email } = req.params
+      const { isPermit } = req.body
+      const userInfo = getUserInfoFromRequest(req)
+      if (typeof isPermit !== "boolean") {
+        return res.status(400).json({
+          error: "isPermit must be a boolean value",
+          success: false,
+        })
+      }
+      const existingUser = await usersStorage.findOne({ userEmail: email })
+      if (!existingUser) {
+        return res.status(404).json({
+          error: "User not found in database",
+          success: false,
+        })
+      }
+      const updateData = {
+        isPermit,
+        updatedAt: new Date(),
+        permitUpdatedBy: "admin",
+        permitUpdatedAt: new Date(),
+      }
+      const result = await usersStorage.updateOne({ userEmail: email }, { $set: updateData })
+      if (result.matchedCount === 0) {
+        return res.status(404).json({
+          error: "User not found in database",
+          success: false,
+        })
+      }
+      await auditLogger.logAudit({
+        action: isPermit ? "GRANT_BLOG_PERMIT" : "REVOKE_BLOG_PERMIT",
+        resource: "user",
+        resourceId: existingUser._id.toString(),
+        userId: "admin",
+        userEmail: "admin@toolmate.com",
+        role: "admin",
+        oldData: { isPermit: existingUser.isPermit },
+        newData: updateData,
+        metadata: {
+          targetUser: email,
+          permitStatus: isPermit,
+          adminAction: true,
+        },
+        ...userInfo,
+      })
+      if (isPermit && !existingUser.isPermit) {
+        try {
+          await emailTriggers.triggerSystemAlert(
+            email,
+            existingUser.userName,
+            "Blog Posting Permission Granted",
+            `Hi ${existingUser.userName},\n\nGreat news! You now have permission to create and manage blog posts on our platform.\n\nYou can start creating amazing content right away!\n\nBest regards,\nThe Admin Team`,
+          )
+        } catch (emailError) {
+          console.warn("Failed to send permit notification email:", emailError)
+        }
+      }
+      res.json({
+        success: true,
+        message: `Blog permissions ${isPermit ? "granted to" : "revoked from"} user successfully`,
+        data: {
+          userEmail: email,
+          isPermit,
+          updatedAt: new Date(),
+        },
+      })
+    } catch (error) {
+      console.error("❌ Error updating user permit:", error)
+      res.status(500).json({
+        error: "Failed to update user permit status",
+        success: false,
+      })
+    }
+  })
+
   return router
 }
