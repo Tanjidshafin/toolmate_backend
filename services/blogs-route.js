@@ -1,8 +1,7 @@
 const express = require('express');
 const router = express.Router();
 module.exports = (dependencies) => {
-  const { ObjectId, client, auditLogger, getUserInfoFromRequest } = dependencies;
-  const blogsStorage = client.db('Toolmate').collection('Blogs');
+  const { ObjectId, blogsStorage, auditLogger, getUserInfoFromRequest } = dependencies;
   router.get('/api/blogs', async (req, res) => {
     try {
       const { page = 1, limit = 10, category, tag, search, sortBy = 'publishedDate', sortOrder = 'desc' } = req.query;
@@ -63,10 +62,7 @@ module.exports = (dependencies) => {
           error: 'Blog not found',
         });
       }
-      res.json({
-        success: true,
-        data: blog,
-      });
+      res.json(blog);
     } catch (error) {
       console.error('Error fetching blog:', error);
       res.status(500).json({
@@ -84,10 +80,7 @@ module.exports = (dependencies) => {
         .sort({ publishedDate: -1 })
         .limit(Number.parseInt(limit))
         .toArray();
-      res.json({
-        success: true,
-        data: blogs,
-      });
+      res.json(blogs);
     } catch (error) {
       console.error('Error fetching blogs by category:', error);
       res.status(500).json({
