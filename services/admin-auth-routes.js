@@ -179,12 +179,17 @@ module.exports = ({ auditLogger, getUserInfoFromRequest, emailTriggers, adminCre
         });
       }
       const updateFields = {};
+      let usernameChanged = false;
+      let passwordChanged = false;
+
       if (newUsername) {
         updateFields.username = newUsername;
+        usernameChanged = true;
       }
       if (newPassword) {
         const hashedNewPassword = await bcrypt.hash(newPassword, 10);
         updateFields.password = hashedNewPassword;
+        passwordChanged = true;
       }
       if (Object.keys(updateFields).length === 0) {
         return res.status(400).json({
@@ -205,7 +210,7 @@ module.exports = ({ auditLogger, getUserInfoFromRequest, emailTriggers, adminCre
             updatedFields: Object.keys(updateFields),
             oldUsername: adminCredential.username,
             newUsername: newUsername || adminCredential.username,
-            passwordChanged: !!newPassword,
+            passwordChanged: passwordChanged,
           },
           metadata: {
             adminAction: true,
@@ -213,26 +218,75 @@ module.exports = ({ auditLogger, getUserInfoFromRequest, emailTriggers, adminCre
           },
           ...userInfo,
         });
-        await emailTriggers.triggerSystemAlert(
-          userEmail,
-          newUsername,
-          `Password Updated`,
-          `G’day ${newUsername.split(' ')[0]},
+        if (passwordChanged && usernameChanged) {
+          await emailTriggers.triggerSystemAlert(
+            userEmail,
+            newUsername,
+            `Username and Password Updated`,
+            `G'day ${newUsername.split(' ')[0]},
 
-Just letting you know, your ToolMate account password’s been updated and you’re all set. Here’s what you’ll need to log in:
+Just letting you know, your ToolMate account credentials have been updated and you're all set. Here are your new login details:
 Email: ${userEmail}  
+New Username: ${newUsername}
 New Password: ${newPassword}
+
 A couple of quick tips, mate:
-1. Jump in and log on with your new password when you get a sec.
-2. Keep this email private — don’t go sharing your password with anyone.
-3. If you didn’t ask for this change, give us a shout at contact@toolmate.com.au and we’ll sort it out.
+1. Jump in and log on with your new username and password when you get a sec.
+2. Keep this email private — don't go sharing your credentials with anyone.
+3. If you didn't ask for this change, give us a shout at contact@toolmate.com.au and we'll sort it out.
 
 Got any dramas or need a hand with anything?
 Just reply to this email or reach out to our support crew.
 
 Catch you soon,  
-Matey from ToolMate`
-        );
+Matey from ToolMate`
+          );
+        } else if (passwordChanged) {
+          await emailTriggers.triggerSystemAlert(
+            userEmail,
+            adminCredential.username,
+            `Password Updated`,
+            `G'day ${adminCredential.username.split(' ')[0]},
+
+Just letting you know, your ToolMate account password's been updated and you're all set. Here's what you'll need to log in:
+Email: ${userEmail}  
+New Password: ${newPassword}
+
+A couple of quick tips, mate:
+1. Jump in and log on with your new password when you get a sec.
+2. Keep this email private — don't go sharing your password with anyone.
+3. If you didn't ask for this change, give us a shout at contact@toolmate.com.au and we'll sort it out.
+
+Got any dramas or need a hand with anything?
+Just reply to this email or reach out to our support crew.
+
+Catch you soon,  
+Matey from ToolMate`
+          );
+        } else if (usernameChanged) {
+          await emailTriggers.triggerSystemAlert(
+            userEmail,
+            newUsername,
+            `Username Updated`,
+            `G'day ${newUsername.split(' ')[0]},
+
+Just letting you know, your ToolMate account username has been updated and you're all set. Here are your new login details:
+Email: ${userEmail}  
+New Username: ${newUsername}
+
+A couple of quick tips, mate:
+1. Jump in and log on with your new username when you get a sec.
+2. Keep this email private — don't go sharing your username with anyone.
+3. If you didn't ask for this change, give us a shout at contact@toolmate.com.au and we'll sort it out.
+
+Got any dramas or need a hand with anything?
+Just reply to this email or reach out to our support crew.
+
+Catch you soon,  
+Matey from ToolMate`
+          );
+        }
+
         return res.status(200).json({
           success: true,
           message: 'Credentials updated successfully.',

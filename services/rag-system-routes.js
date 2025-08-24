@@ -378,15 +378,12 @@ module.exports = ({
         const shedTools = await shedToolsStorage
           .find({ user_id: userID, collection: { $ne: 'shed_analytics' } })
           .toArray();
-
         const shedToolNames = new Set(shedTools.map((t) => t.tool_name?.toLowerCase()));
         const filteredResults = [];
-
         for (const tool of results) {
           const words = tool.product_name.split(' ').map((w) => w.toLowerCase());
           const firstWord = words[1] || '';
           const secondWord = words[2] || '';
-
           if (shedToolNames.has(firstWord) || shedToolNames.has(secondWord)) {
             removedTools.push(tool.product_name);
           } else {
@@ -395,39 +392,29 @@ module.exports = ({
         }
         results = filteredResults;
       }
-
       let finalTools = [];
       if (results.length > 0) {
         const grouped = {};
         results.forEach((tool) => {
-          const key = tool.brand || 'general';
+          const key = tool.retailer || 'general';
           if (!grouped[key]) grouped[key] = [];
           grouped[key].push(tool);
         });
-
-        // First, take one tool from each brand
         Object.values(grouped).forEach((group) => {
           if (group.length > 0 && finalTools.length < 5) {
             finalTools.push(group[0]);
           }
         });
-
-        // If we still need more tools to reach 5, add more from existing brands
         if (finalTools.length < 5) {
           const remainingTools = [];
           Object.values(grouped).forEach((group) => {
-            // Skip the first tool since we already added it
             for (let i = 1; i < group.length; i++) {
               remainingTools.push(group[i]);
             }
           });
-
-          // Add remaining tools until we have 5 total
           const needed = 5 - finalTools.length;
           finalTools = finalTools.concat(remainingTools.slice(0, needed));
         }
-
-        // Ensure we never exceed 5 tools
         finalTools = finalTools.slice(0, 5);
       }
 
