@@ -16,6 +16,7 @@ class LRUCache {
     }
     return null
   }
+
   set(key, value) {
     if (this.cache.has(key)) {
       this.cache.delete(key)
@@ -25,10 +26,12 @@ class LRUCache {
     }
     this.cache.set(key, value)
   }
+
   has(key) {
     return this.cache.has(key)
   }
 }
+
 module.exports = ({
   sessionsStorage,
   chatLogsStorage,
@@ -39,7 +42,9 @@ module.exports = ({
   getUserInfoFromRequest,
 }) => {
   const router = express.Router()
-  const chatCache = new LRUCache(100)
+
+  const chatCache = new LRUCache(100) // Cache for 100 different session-user combinations
+
   router.post("/store-session", async (req, res) => {
     try {
       const {
@@ -53,8 +58,10 @@ module.exports = ({
         flagTriggered = false,
         messages = [],
       } = req.body
+
       const userInfo = getUserInfoFromRequest(req)
       const timestamp = new Date()
+
       const sessionData = {
         sessionId,
         userName,
@@ -317,12 +324,11 @@ module.exports = ({
           userEmail: cachedData.userEmail,
           userName: cachedData.userName,
           messages: cachedData.messages,
-          chatLogs: cachedData.chatLogs,
           timestamp: cachedData.timestamp,
           budgetTier: cachedData.budgetTier,
           flagTriggered: cachedData.flagTriggered,
           fromCache: true,
-          totalCached: cachedData.messages.length + cachedData.chatLogs.length,
+          totalCached: cachedData.messages.length,
         })
         return
       }
@@ -333,26 +339,15 @@ module.exports = ({
       if (!session) {
         return res.status(404).json({ error: "Session not found" })
       }
-      const allChatLogs = await chatLogsStorage
-        .find({
-          sessionId: sessionId,
-          $or: [{ userEmail: userEmail }, { userEmail: { $in: [userEmail] } }],
-        })
-        .sort({ timestamp: 1 })
-        .toArray()
-      const allMessages = [
-        ...(session.messages || []).map((msg) => ({ ...msg, type: "session_message" })),
-        ...allChatLogs.map((log) => ({ ...log, type: "chat_log" })),
-      ].sort((a, b) => new Date(a.timestamp || a.createdAt) - new Date(b.timestamp || b.createdAt))
+      const allMessages = (session.messages || []).sort(
+        (a, b) => new Date(a.timestamp || a.createdAt) - new Date(b.timestamp || b.createdAt),
+      )
       const last50Messages = allMessages.slice(-50)
-      const last50SessionMessages = last50Messages.filter((msg) => msg.type === "session_message")
-      const last50ChatLogs = last50Messages.filter((msg) => msg.type === "chat_log")
       const cacheData = {
         sessionId: session.sessionId,
         userEmail: session.userEmail,
         userName: session.userName,
-        messages: last50SessionMessages,
-        chatLogs: last50ChatLogs,
+        messages: last50Messages,
         timestamp: session.timestamp,
         budgetTier: session.budgetTier,
         flagTriggered: session.flagTriggered,
@@ -360,15 +355,12 @@ module.exports = ({
       chatCache.set(cacheKey, cacheData)
       const skip = (page - 1) * limit
       const paginatedMessages = allMessages.slice(skip, skip + Number.parseInt(limit))
-      const paginatedSessionMessages = paginatedMessages.filter((msg) => msg.type === "session_message")
-      const paginatedChatLogs = paginatedMessages.filter((msg) => msg.type === "chat_log")
       res.json({
         success: true,
         sessionId: session.sessionId,
         userEmail: session.userEmail,
         userName: session.userName,
-        messages: paginatedSessionMessages,
-        chatLogs: paginatedChatLogs,
+        messages: paginatedMessages,
         timestamp: session.timestamp,
         budgetTier: session.budgetTier,
         flagTriggered: session.flagTriggered,
