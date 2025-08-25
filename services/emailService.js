@@ -172,6 +172,7 @@ class EmailService {
       };
       const response = await sgMail.send(msg);
       await this.logEmail({
+        content: msg.html,
         type: 'welcome',
         recipient: userEmail,
         recipientName: userName,
@@ -183,6 +184,7 @@ class EmailService {
     } catch (error) {
       console.error('❌ Failed to send welcome email:', error);
       await this.logEmail({
+        content: msg.html,
         type: 'welcome',
         recipient: userEmail,
         recipientName: userName,
@@ -322,6 +324,7 @@ class EmailService {
       };
       const response = await sgMail.send(msg);
       await this.logEmail({
+        content: msg.html,
         type: 'password_reset_success',
         recipient: userEmail,
         recipientName: userName,
@@ -334,6 +337,7 @@ class EmailService {
     } catch (error) {
       console.error('❌ Failed to send password reset email:', error);
       await this.logEmail({
+        content: msg.html,
         type: 'password_reset_success',
         recipient: userEmail,
         recipientName: userName,
@@ -511,6 +515,7 @@ class EmailService {
       };
       const response = await sgMail.send(msg);
       await this.logEmail({
+        content: msg.html,
         type: 'system_alert',
         subType: alertType,
         recipient: userEmail,
@@ -525,6 +530,7 @@ class EmailService {
       console.error('❌ Failed to send system alert email:', error);
 
       await this.logEmail({
+        content: msg.html,
         type: 'system_alert',
         subType: alertType,
         recipient: userEmail,
@@ -655,6 +661,7 @@ class EmailService {
 
       const response = await sgMail.send(msg);
       await this.logEmail({
+        content: msg.html,
         type: 'name_changed',
         recipient: userEmail,
         recipientName: userName,
@@ -669,6 +676,7 @@ class EmailService {
     } catch (error) {
       console.error('❌ Failed to send name changed email:', error);
       await this.logEmail({
+        content: msg.html,
         type: 'name_changed',
         recipient: userEmail,
         recipientName: userName,
@@ -726,6 +734,7 @@ class EmailService {
 
       const response = await sgMail.send(msg);
       await this.logEmail({
+        content: msg.html,
         type: 'email_changed',
         recipient: newEmail,
         recipientName: userName,
@@ -740,6 +749,7 @@ class EmailService {
     } catch (error) {
       console.error('❌ Failed to send email changed notification:', error);
       await this.logEmail({
+        content: msg.html,
         type: 'email_changed',
         recipient: newEmail,
         recipientName: userName,
@@ -797,6 +807,7 @@ class EmailService {
 
       const response = await sgMail.send(msg);
       await this.logEmail({
+        content: msg.html,
         type: 'password_changed',
         recipient: userEmail,
         recipientName: userName,
@@ -810,6 +821,7 @@ class EmailService {
     } catch (error) {
       console.error('❌ Failed to send password changed email:', error);
       await this.logEmail({
+        content: msg.html,
         type: 'password_changed',
         recipient: userEmail,
         recipientName: userName,
@@ -933,6 +945,7 @@ class EmailService {
 
       const response = await sgMail.send(msg);
       await this.logEmail({
+        content: msg.html,
         type: 'user_banned',
         recipient: userEmail,
         recipientName: userName,
@@ -947,6 +960,7 @@ class EmailService {
     } catch (error) {
       console.error('❌ Failed to send user banned email:', error);
       await this.logEmail({
+        content: msg.html,
         type: 'user_banned',
         recipient: userEmail,
         recipientName: userName,
@@ -1064,6 +1078,7 @@ class EmailService {
 
       const response = await sgMail.send(msg);
       await this.logEmail({
+        content: msg.html,
         type: 'user_unbanned',
         recipient: userEmail,
         recipientName: userName,
@@ -1077,6 +1092,7 @@ class EmailService {
     } catch (error) {
       console.error('❌ Failed to send user unbanned email:', error);
       await this.logEmail({
+        content: msg.html,
         type: 'user_unbanned',
         recipient: userEmail,
         recipientName: userName,
@@ -1215,6 +1231,7 @@ class EmailService {
 
       const response = await sgMail.send(msg);
       await this.logEmail({
+        content: msg.html,
         type: 'role_changed',
         recipient: userEmail,
         recipientName: userName,
@@ -1229,6 +1246,7 @@ class EmailService {
     } catch (error) {
       console.error('❌ Failed to send role changed email:', error);
       await this.logEmail({
+        content: msg.html,
         type: 'role_changed',
         recipient: userEmail,
         recipientName: userName,
@@ -1381,6 +1399,7 @@ class EmailService {
 
       const response = await sgMail.send(msg);
       await this.logEmail({
+        content: msg.html,
         type: 'subscription_gifted',
         recipient: userEmail,
         recipientName: userName,
@@ -1395,6 +1414,7 @@ class EmailService {
     } catch (error) {
       console.error('❌ Failed to send subscription gifted email:', error);
       await this.logEmail({
+        content: msg.html,
         type: 'subscription_gifted',
         recipient: userEmail,
         recipientName: userName,
