@@ -17,7 +17,6 @@ module.exports = (dependencies) => {
         query.$or = [
           { title: { $regex: search, $options: "i" } },
           { excerpt: { $regex: search, $options: "i" } },
-          { content: { $regex: search, $options: "i" } },
         ]
       }
       const sort = {}

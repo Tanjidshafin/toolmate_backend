@@ -181,7 +181,6 @@ module.exports = ({ auditLogger, getUserInfoFromRequest, emailTriggers, adminCre
       const updateFields = {};
       let usernameChanged = false;
       let passwordChanged = false;
-
       if (newUsername) {
         updateFields.username = newUsername;
         usernameChanged = true;
