@@ -14,10 +14,7 @@ module.exports = (dependencies) => {
         query.tags = { $in: [tag] }
       }
       if (search) {
-        query.$or = [
-          { title: { $regex: search, $options: "i" } },
-          { excerpt: { $regex: search, $options: "i" } },
-        ]
+        query.$or = [{ title: { $regex: search, $options: "i" } }, { excerpt: { $regex: search, $options: "i" } }]
       }
       const sort = {}
       sort[sortBy] = sortOrder === "desc" ? -1 : 1
@@ -45,49 +42,7 @@ module.exports = (dependencies) => {
       })
     }
   })
-  router.get("/api/blogs/:id", async (req, res) => {
-    try {
-      const { id } = req.params
-      let query
-      if (ObjectId.isValid(id)) {
-        query = { _id: new ObjectId(id) }
-      } else {
-        query = { id: Number.parseInt(id) }
-      }
-      const blog = await blogsStorage.findOne(query)
-      if (!blog) {
-        return res.status(404).json({
-          success: false,
-          error: "Blog not found",
-        })
-      }
-      res.json(blog)
-    } catch (error) {
-      console.error("Error fetching blog:", error)
-      res.status(500).json({
-        success: false,
-        error: "Failed to fetch blog",
-      })
-    }
-  })
-  router.get("/api/blogs/category/:category", async (req, res) => {
-    try {
-      const { category } = req.params
-      const { limit = 5 } = req.query
-      const blogs = await blogsStorage
-        .find({ category })
-        .sort({ publishedDate: -1 })
-        .limit(Number.parseInt(limit))
-        .toArray()
-      res.json(blogs)
-    } catch (error) {
-      console.error("Error fetching blogs by category:", error)
-      res.status(500).json({
-        success: false,
-        error: "Failed to fetch blogs by category",
-      })
-    }
-  })
+
   router.get("/api/blogs/popular", async (req, res) => {
     try {
       const { limit = 4 } = req.query
@@ -134,6 +89,51 @@ module.exports = (dependencies) => {
       })
     }
   })
+  router.get("/api/blogs/category/:category", async (req, res) => {
+    try {
+      const { category } = req.params
+      const { limit = 5 } = req.query
+      const blogs = await blogsStorage
+        .find({ category })
+        .sort({ publishedDate: -1 })
+        .limit(Number.parseInt(limit))
+        .toArray()
+      res.json(blogs)
+    } catch (error) {
+      console.error("Error fetching blogs by category:", error)
+      res.status(500).json({
+        success: false,
+        error: "Failed to fetch blogs by category",
+      })
+    }
+  })
+
+  router.get("/api/blogs/:id", async (req, res) => {
+    try {
+      const { id } = req.params
+      let query
+      if (ObjectId.isValid(id)) {
+        query = { _id: new ObjectId(id) }
+      } else {
+        query = { id: Number.parseInt(id) }
+      }
+      const blog = await blogsStorage.findOne(query)
+      if (!blog) {
+        return res.status(404).json({
+          success: false,
+          error: "Blog not found",
+        })
+      }
+      res.json(blog)
+    } catch (error) {
+      console.error("Error fetching blog:", error)
+      res.status(500).json({
+        success: false,
+        error: "Failed to fetch blog",
+      })
+    }
+  })
+
   router.post("/api/blogs", async (req, res) => {
     try {
       const blogData = {
