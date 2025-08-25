@@ -158,8 +158,6 @@ module.exports = (dependencies) => {
       res.status(500).json({ error: 'Failed to create checkout session' });
     }
   });
-
-  // Get user subscription details
   router.get('/api/subscription/:userEmail', async (req, res) => {
     try {
       const { userEmail } = req.params;
