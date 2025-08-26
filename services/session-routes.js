@@ -1,34 +1,34 @@
-const express = require("express")
-const { ObjectId } = require("mongodb")
+const express = require('express');
+const { ObjectId } = require('mongodb');
 
 class LRUCache {
   constructor(maxSize = 100) {
-    this.maxSize = maxSize
-    this.cache = new Map()
+    this.maxSize = maxSize;
+    this.cache = new Map();
   }
 
   get(key) {
     if (this.cache.has(key)) {
-      const value = this.cache.get(key)
-      this.cache.delete(key)
-      this.cache.set(key, value)
-      return value
+      const value = this.cache.get(key);
+      this.cache.delete(key);
+      this.cache.set(key, value);
+      return value;
     }
-    return null
+    return null;
   }
 
   set(key, value) {
     if (this.cache.has(key)) {
-      this.cache.delete(key)
+      this.cache.delete(key);
     } else if (this.cache.size >= this.maxSize) {
-      const firstKey = this.cache.keys().next().value
-      this.cache.delete(firstKey)
+      const firstKey = this.cache.keys().next().value;
+      this.cache.delete(firstKey);
     }
-    this.cache.set(key, value)
+    this.cache.set(key, value);
   }
 
   has(key) {
-    return this.cache.has(key)
+    return this.cache.has(key);
   }
 }
 
@@ -41,11 +41,11 @@ module.exports = ({
   notifyActiveSessionsChanged,
   getUserInfoFromRequest,
 }) => {
-  const router = express.Router()
+  const router = express.Router();
 
-  const chatCache = new LRUCache(100) // Cache for 100 different session-user combinations
+  const chatCache = new LRUCache(100);
 
-  router.post("/store-session", async (req, res) => {
+  router.post('/store-session', async (req, res) => {
     try {
       const {
         sessionId,
@@ -57,10 +57,10 @@ module.exports = ({
         budgetTier,
         flagTriggered = false,
         messages = [],
-      } = req.body
+      } = req.body;
 
-      const userInfo = getUserInfoFromRequest(req)
-      const timestamp = new Date()
+      const userInfo = getUserInfoFromRequest(req);
+      const timestamp = new Date();
 
       const sessionData = {
         sessionId,
@@ -73,7 +73,7 @@ module.exports = ({
         timestamp,
         flagTriggered,
         messages,
-      }
+      };
 
       const logData = {
         sessionId,
@@ -86,10 +86,10 @@ module.exports = ({
         timestamp,
         flagTriggered,
         metadata: {
-          userAgent: req.headers["user-agent"],
+          userAgent: req.headers['user-agent'],
           ip: req.ip,
         },
-      }
+      };
       if (messages && messages.length > 0 && sessionId) {
         emitNewLiveMessage({
           sessionId,
@@ -98,21 +98,21 @@ module.exports = ({
           timestamp,
           messageText: mateyResponse,
           userPrompt: prompt,
-        })
+        });
       }
       const [sessionInsert, logInsert] = await Promise.all([
         sessionsStorage.insertOne(sessionData),
         chatLogsStorage.insertOne(logData),
-      ])
+      ]);
 
       // Log audit for session creation
       await auditLogger.logAudit({
-        action: "CREATE",
-        resource: "session",
+        action: 'CREATE',
+        resource: 'session',
         resourceId: sessionInsert.insertedId.toString(),
         userId: userEmail?.[0] || userEmail,
         userEmail: userEmail?.[0] || userEmail,
-        role: "user",
+        role: 'user',
         newData: {
           sessionId,
           userName,
@@ -121,137 +121,228 @@ module.exports = ({
           flagTriggered,
         },
         ...userInfo,
-      })
+      });
 
-      notifyActiveSessionsChanged()
+      notifyActiveSessionsChanged();
       res.json({
         success: true,
         sessionId: sessionInsert.insertedId,
         logId: logInsert.insertedId,
-      })
+      });
     } catch (error) {
-      console.error("Error storing session:", error)
-      res.status(500).json({ error: "Failed to store session" })
+      console.error('Error storing session:', error);
+      res.status(500).json({ error: 'Failed to store session' });
     }
-  })
+  });
 
-  router.get("/admin/chat-logs", async (req, res) => {
+  router.get('/admin/chat-logs', async (req, res) => {
     try {
-      const { page = 1, limit = 50, search, flaggedOnly } = req.query
-      const skip = (page - 1) * limit
-
-      const query = {}
+      const { page = 1, limit = 50, search, flaggedOnly } = req.query;
+      const skip = (page - 1) * limit;
+      const matchStage = {};
       if (search) {
-        query.$or = [
-          { userName: { $regex: search, $options: "i" } },
-          { prompt: { $regex: search, $options: "i" } },
-          { mateyResponse: { $regex: search, $options: "i" } },
-        ]
+        matchStage.$or = [
+          { userName: { $regex: search, $options: 'i' } },
+          { prompt: { $regex: search, $options: 'i' } },
+          { mateyResponse: { $regex: search, $options: 'i' } },
+        ];
       }
-      if (flaggedOnly === "true") {
-        query.flagTriggered = true
+      if (flaggedOnly === 'true') {
+        matchStage.flagTriggered = true;
       }
-      const logs = await chatLogsStorage
-        .find(query)
-        .sort({ timestamp: -1 })
-        .skip(skip)
-        .limit(Number.parseInt(limit))
-        .toArray()
-      const total = await chatLogsStorage.countDocuments(query)
-      const enrichedLogs = await Promise.all(
-        logs.map(async (log) => {
-          const user = await usersStorage.findOne({
-            userEmail: { $in: Array.isArray(log.userEmail) ? log.userEmail : [log.userEmail] },
-          })
-          return {
-            ...log,
-            userDetails: user || null,
-          }
-        }),
-      )
-
+      const pipeline = [
+        { $match: matchStage },
+        { $sort: { timestamp: -1 } },
+        { $skip: skip },
+        { $limit: Number.parseInt(limit) },
+        {
+          $lookup: {
+            from: 'users',
+            let: {
+              userEmails: {
+                $cond: {
+                  if: { $isArray: '$userEmail' },
+                  then: '$userEmail',
+                  else: ['$userEmail'],
+                },
+              },
+            },
+            pipeline: [
+              { $match: { $expr: { $in: ['$userEmail', '$$userEmails'] } } },
+              { $limit: 1 },
+              { $project: { userEmail: 1, userName: 1, createdAt: 1, _id: 1 } },
+            ],
+            as: 'userDetails',
+          },
+        },
+        {
+          $addFields: {
+            userDetails: { $arrayElemAt: ['$userDetails', 0] },
+          },
+        },
+      ];
+      const [logs, totalResult] = await Promise.all([
+        chatLogsStorage.aggregate(pipeline).toArray(),
+        chatLogsStorage.aggregate([{ $match: matchStage }, { $count: 'total' }]).toArray(),
+      ]);
+      const total = totalResult[0]?.total || 0;
       res.json({
-        logs: enrichedLogs,
+        logs,
         pagination: {
           current: Number.parseInt(page),
           total: Math.ceil(total / limit),
           count: total,
         },
-      })
+      });
     } catch (error) {
-      console.error("Error fetching chat logs:", error)
-      res.status(500).json({ error: "Failed to fetch chat logs" })
+      console.error('Error fetching chat logs:', error);
+      res.status(500).json({ error: 'Failed to fetch chat logs' });
     }
-  })
+  });
 
-  router.get("/admin/sessions", async (req, res) => {
+  router.get('/admin/sessions', async (req, res) => {
     try {
-      const { page = 1, limit = 20, search } = req.query
-      const skip = (page - 1) * limit
-      const query = {}
+      const { page = 1, limit = 20, search, lightweight = 'false' } = req.query;
+      const skip = (page - 1) * limit;
+      const matchStage = {};
       if (search) {
-        query.$or = [{ userName: { $regex: search, $options: "i" } }, { prompt: { $regex: search, $options: "i" } }]
+        matchStage.$or = [
+          { userName: { $regex: search, $options: 'i' } },
+          { prompt: { $regex: search, $options: 'i' } },
+        ];
       }
 
-      const sessions = await sessionsStorage
-        .find(query)
-        .sort({ timestamp: -1 })
-        .skip(skip)
-        .limit(Number.parseInt(limit))
-        .toArray()
-      const total = await sessionsStorage.countDocuments(query)
-      const enrichedSessions = await Promise.all(
-        sessions.map(async (session) => {
-          const emailToQuery = Array.isArray(session.userEmail) ? session.userEmail[0] : session.userEmail
-          const user = emailToQuery ? await usersStorage.findOne({ userEmail: emailToQuery }) : null
-          return {
-            ...session,
-            userDetails: user || null,
-          }
-        }),
-      )
+      const pipeline = [
+        { $match: matchStage },
+        { $sort: { timestamp: -1 } },
+        { $skip: skip },
+        { $limit: Number.parseInt(limit) },
+      ];
+      if (lightweight === 'true') {
+        pipeline.push({
+          $project: {
+            sessionId: 1,
+            userName: 1,
+            userEmail: 1,
+            prompt: { $substr: ['$prompt', 0, 150] },
+            timestamp: 1,
+            flagTriggered: 1,
+            budgetTier: 1,
+            messageCount: { $size: { $ifNull: ['$messages', []] } },
+            toolCount: { $size: { $ifNull: ['$suggestedTools', []] } },
+          },
+        });
+      }
+      pipeline.push({
+        $lookup: {
+          from: 'users',
+          let: {
+            emailToQuery: {
+              $cond: {
+                if: { $isArray: '$userEmail' },
+                then: { $arrayElemAt: ['$userEmail', 0] },
+                else: '$userEmail',
+              },
+            },
+          },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [{ $ne: ['$$emailToQuery', null] }, { $eq: ['$userEmail', '$$emailToQuery'] }],
+                },
+              },
+            },
+            { $limit: 1 },
+            { $project: { userEmail: 1, userName: 1, createdAt: 1, _id: 1, isSubscribed: 1, userImage: 1, role: 1 } },
+          ],
+          as: 'userDetails',
+        },
+      });
 
+      pipeline.push({
+        $addFields: {
+          userDetails: { $arrayElemAt: ['$userDetails', 0] },
+        },
+      });
+
+      const [sessions, totalResult] = await Promise.all([
+        sessionsStorage.aggregate(pipeline).toArray(),
+        sessionsStorage.aggregate([{ $match: matchStage }, { $count: 'total' }]).toArray(),
+      ]);
+      const total = totalResult[0]?.total || 0;
       res.json({
-        sessions: enrichedSessions,
+        sessions,
         pagination: {
           current: Number.parseInt(page),
           total: Math.ceil(total / limit),
           count: total,
         },
-      })
+      });
     } catch (error) {
-      console.error("Error fetching sessions:", error)
-      res.status(500).json({ error: "Failed to fetch sessions" })
+      console.error('Error fetching sessions:', error);
+      res.status(500).json({ error: 'Failed to fetch sessions' });
     }
-  })
+  });
 
-  router.get("/admin/sessions/:id", async (req, res) => {
+  router.get('/admin/sessions/:id/details', async (req, res) => {
     try {
-      const { id } = req.params
+      const { id } = req.params;
       if (!ObjectId.isValid(id)) {
-        return res.status(400).json({ error: "Invalid session ID format" })
+        return res.status(400).json({ error: 'Invalid session ID format' });
       }
-      const session = await sessionsStorage.findOne({ _id: new ObjectId(id) })
+      const session = await sessionsStorage.findOne(
+        { _id: new ObjectId(id) },
+        {
+          projection: {
+            messages: 1,
+            suggestedTools: 1,
+            mateyResponse: 1,
+            prompt: 1,
+          },
+        }
+      );
 
       if (!session) {
-        return res.status(404).json({ error: "Session not found" })
+        return res.status(404).json({ error: 'Session not found' });
       }
-      const emailToQuery = Array.isArray(session.userEmail) ? session.userEmail[0] : session.userEmail
-      const user = emailToQuery ? await usersStorage.findOne({ userEmail: emailToQuery }) : null
+
+      res.json({
+        messages: session.messages || [],
+        suggestedTools: session.suggestedTools || [],
+        mateyResponse: session.mateyResponse || '',
+        fullPrompt: session.prompt || '',
+      });
+    } catch (error) {
+      console.error('Error fetching session details:', error);
+      res.status(500).json({ error: 'Failed to fetch session details' });
+    }
+  });
+  router.get('/admin/sessions/:id', async (req, res) => {
+    try {
+      const { id } = req.params;
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({ error: 'Invalid session ID format' });
+      }
+      const session = await sessionsStorage.findOne({ _id: new ObjectId(id) });
+      if (!session) {
+        return res.status(404).json({ error: 'Session not found' });
+      }
+      const emailToQuery = Array.isArray(session.userEmail) ? session.userEmail[0] : session.userEmail;
+      const user = emailToQuery ? await usersStorage.findOne({ userEmail: emailToQuery }) : null;
       res.json({
         ...session,
         userDetails: user || null,
-      })
+      });
     } catch (error) {
-      console.error("Error fetching session:", error)
-      res.status(500).json({ error: "Failed to fetch session" })
+      console.error('Error fetching session:', error);
+      res.status(500).json({ error: 'Failed to fetch session' });
     }
-  })
-
-  router.get("/admin/active-sessions", async (req, res) => {
+  });
+  router.get('/admin/active-sessions', async (req, res) => {
     try {
-      const fiveMinutesAgo = new Date()
-      fiveMinutesAgo.setMinutes(fiveMinutesAgo.getMinutes() - 5)
+      const fiveMinutesAgo = new Date();
+      fiveMinutesAgo.setMinutes(fiveMinutesAgo.getMinutes() - 5);
       const uniqueSessions = await chatLogsStorage
         .aggregate([
           {
@@ -263,13 +354,13 @@ module.exports = ({
             $addFields: {
               email: {
                 $cond: {
-                  if: { $isArray: "$userEmail" },
-                  then: { $arrayElemAt: ["$userEmail", 0] },
-                  else: "$userEmail",
+                  if: { $isArray: '$userEmail' },
+                  then: { $arrayElemAt: ['$userEmail', 0] },
+                  else: '$userEmail',
                 },
               },
-              userAgent: "$metadata.userAgent",
-              ip: "$metadata.ip",
+              userAgent: '$metadata.userAgent',
+              ip: '$metadata.ip',
             },
           },
           {
@@ -278,45 +369,45 @@ module.exports = ({
           {
             $group: {
               _id: {
-                email: "$email",
-                userName: "$userName",
-                userAgent: "$userAgent",
-                ip: "$ip",
+                email: '$email',
+                userName: '$userName',
+                userAgent: '$userAgent',
+                ip: '$ip',
               },
-              latestSession: { $first: "$$ROOT" },
+              latestSession: { $first: '$$ROOT' },
             },
           },
           {
-            $replaceRoot: { newRoot: "$latestSession" },
+            $replaceRoot: { newRoot: '$latestSession' },
           },
         ])
-        .toArray()
+        .toArray();
       const enrichedSessions = await Promise.all(
         uniqueSessions.map(async (session) => {
-          const emailToQuery = session.userEmail?.[0] || session.userEmail
-          const user = emailToQuery ? await usersStorage.findOne({ userEmail: emailToQuery }) : null
+          const emailToQuery = session.userEmail?.[0] || session.userEmail;
+          const user = emailToQuery ? await usersStorage.findOne({ userEmail: emailToQuery }) : null;
           return {
             ...session,
             userDetails: user || null,
-          }
-        }),
-      )
-      res.json(enrichedSessions)
+          };
+        })
+      );
+      res.json(enrichedSessions);
     } catch (error) {
-      console.error("Error fetching active sessions:", error)
-      res.status(500).json({ error: "Failed to fetch active sessions" })
+      console.error('Error fetching active sessions:', error);
+      res.status(500).json({ error: 'Failed to fetch active sessions' });
     }
-  })
+  });
 
-  router.get("/chats/:sessionId/:userEmail", async (req, res) => {
+  router.get('/chats/:sessionId/:userEmail', async (req, res) => {
     try {
-      const { sessionId, userEmail } = req.params
-      const { page = 1, limit = 50 } = req.query
+      const { sessionId, userEmail } = req.params;
+      const { page = 1, limit = 50 } = req.query;
       if (!sessionId || !userEmail) {
-        return res.status(400).json({ error: "SessionId and userEmail are required" })
+        return res.status(400).json({ error: 'SessionId and userEmail are required' });
       }
-      const cacheKey = `${sessionId}:${userEmail}`
-      const cachedData = chatCache.get(cacheKey)
+      const cacheKey = `${sessionId}:${userEmail}`;
+      const cachedData = chatCache.get(cacheKey);
       if (cachedData) {
         res.json({
           success: true,
@@ -329,20 +420,20 @@ module.exports = ({
           flagTriggered: cachedData.flagTriggered,
           fromCache: true,
           totalCached: cachedData.messages.length,
-        })
-        return
+        });
+        return;
       }
       const session = await sessionsStorage.findOne({
         sessionId: sessionId,
         $or: [{ userEmail: userEmail }, { userEmail: { $in: [userEmail] } }],
-      })
+      });
       if (!session) {
-        return res.status(404).json({ error: "Session not found" })
+        return res.status(404).json({ error: 'Session not found' });
       }
       const allMessages = (session.messages || []).sort(
-        (a, b) => new Date(a.timestamp || a.createdAt) - new Date(b.timestamp || b.createdAt),
-      )
-      const last50Messages = allMessages.slice(-50)
+        (a, b) => new Date(a.timestamp || a.createdAt) - new Date(b.timestamp || b.createdAt)
+      );
+      const last50Messages = allMessages.slice(-50);
       const cacheData = {
         sessionId: session.sessionId,
         userEmail: session.userEmail,
@@ -351,10 +442,10 @@ module.exports = ({
         timestamp: session.timestamp,
         budgetTier: session.budgetTier,
         flagTriggered: session.flagTriggered,
-      }
-      chatCache.set(cacheKey, cacheData)
-      const skip = (page - 1) * limit
-      const paginatedMessages = allMessages.slice(skip, skip + Number.parseInt(limit))
+      };
+      chatCache.set(cacheKey, cacheData);
+      const skip = (page - 1) * limit;
+      const paginatedMessages = allMessages.slice(skip, skip + Number.parseInt(limit));
       res.json({
         success: true,
         sessionId: session.sessionId,
@@ -371,12 +462,11 @@ module.exports = ({
           count: allMessages.length,
           showing: paginatedMessages.length,
         },
-      })
+      });
     } catch (error) {
-      console.error("Error fetching chats:", error)
-      res.status(500).json({ error: "Failed to fetch chats" })
+      console.error('Error fetching chats:', error);
+      res.status(500).json({ error: 'Failed to fetch chats' });
     }
-  })
-
-  return router
-}
+  });
+  return router;
+};
