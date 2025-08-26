@@ -20,13 +20,28 @@ module.exports = ({ flaggedMessagesStorage, sessionsStorage, usersStorage, audit
           $options: 'i',
         };
       }
-      const flaggedMessages = await flaggedMessagesStorage
-        .find(query)
-        .sort({ flaggedAt: -1 })
-        .skip(skip)
-        .limit(Number.parseInt(limit))
-        .toArray();
-      const total = await flaggedMessagesStorage.countDocuments(query);
+      const [flaggedMessages, total] = await Promise.all([
+        flaggedMessagesStorage
+          .find(query, {
+            projection: {
+              messageText: 1,
+              status: 1,
+              flaggedAt: 1,
+              userId: 1,
+              reason: 1,
+              expiresAt: 1,
+            },
+          })
+          .sort({ flaggedAt: -1 })
+          .skip(skip)
+          .limit(Number.parseInt(limit))
+          .toArray(),
+        flaggedMessagesStorage.countDocuments(query),
+      ]);
+      res.set({
+        'Cache-Control': 'public, max-age=30',
+        ETag: `"${total}-${page}-${status || 'all'}"`,
+      });
       res.json({
         flaggedMessages,
         pagination: {
