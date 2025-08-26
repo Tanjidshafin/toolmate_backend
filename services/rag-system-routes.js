@@ -6,12 +6,11 @@ module.exports = ({
   auditLogger,
   getUserInfoFromRequest,
   toolAnalyticsStorage,
-  promoStorage,
+  storeLocationStorage,
   devTestOverrideStorage,
   io,
 }) => {
   const router = express.Router();
-
   router.get('/admin/rag-system', async (req, res) => {
     try {
       const { page = 1, limit = 10, search } = req.query;
@@ -276,9 +275,9 @@ module.exports = ({
 
   router.get('/rag-system/filtered-tools', async (req, res) => {
     try {
-      const { risk_level, productNames, userID } = req.query;
-      console.log('Query params:', { risk_level, productNames, userID });
-
+      const { risk_level, productNames, userID, lat, lon } = req.query;
+      const userLat = Number(lat);
+      const userLon = Number(lon);
       const initialMatchQuery = {
         hidden: { $ne: true },
         suppressed: { $ne: true },
@@ -313,10 +312,7 @@ module.exports = ({
         ]);
       }
 
-      const pipeline = [
-        { $match: initialMatchQuery },
-        { $limit: 1000 }, // Reasonable limit before sorting
-      ];
+      const pipeline = [{ $match: initialMatchQuery }, { $limit: 1000 }];
 
       if (searchTerms.length > 0) {
         const keywordRelevantOrConditions = searchTerms.flatMap((term) => [
@@ -363,16 +359,13 @@ module.exports = ({
           _hasActivePromo: -1,
         },
       });
-
       pipeline.push({ $limit: 100 });
-
       let results = await ragSystemStorage
         .aggregate(pipeline, {
           allowDiskUse: true,
-          maxTimeMS: 30000, // 30 second timeout
+          maxTimeMS: 30000,
         })
         .toArray();
-
       const removedTools = [];
       if (userID) {
         const shedTools = await shedToolsStorage
@@ -417,24 +410,69 @@ module.exports = ({
         }
         finalTools = finalTools.slice(0, 5);
       }
-
+      let storeLocations = [];
+      if (finalTools.length > 0) {
+        const retailers = [...new Set(finalTools.map((tool) => tool.retailer).filter(Boolean))];
+        if (retailers.length > 0) {
+          const storeQuery = { retailer: { $in: retailers } };
+          const allStores = await storeLocationStorage.find(storeQuery).toArray();
+          if (userLat && userLon) {
+            const userLatNum = Number.parseFloat(userLat);
+            const userLonNum = Number.parseFloat(userLon);
+            const storesWithDistance = allStores
+              .map((store) => {
+                const distance = calculateDistance(userLatNum, userLonNum, store.lat, store.lon);
+                return { ...store, distance };
+              })
+              .sort((a, b) => a.distance - b.distance);
+            const storesByRetailer = {};
+            storesWithDistance.forEach((store) => {
+              if (!storesByRetailer[store.retailer] || store.distance < storesByRetailer[store.retailer].distance) {
+                storesByRetailer[store.retailer] = store;
+              }
+            });
+            storeLocations = Object.values(storesByRetailer);
+          } else {
+            const storesByRetailer = {};
+            allStores.forEach((store) => {
+              if (!storesByRetailer[store.retailer]) {
+                storesByRetailer[store.retailer] = store;
+              }
+            });
+            storeLocations = Object.values(storesByRetailer);
+          }
+        }
+      }
+      function calculateDistance(lat1, lon1, lat2, lon2) {
+        const R = 6371;
+        const dLat = ((lat2 - lat1) * Math.PI) / 180;
+        const dLon = ((lon2 - lon1) * Math.PI) / 180;
+        const a =
+          Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+          Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        return R * c;
+      }
       await toolAnalyticsStorage.insertOne({
         type: 'filtered_search',
         timestamp: new Date(),
         filters: { risk_level },
         searchTerms,
         userID,
+        userLocation: userLat && userLon ? { lat: userLat, lon: userLon } : null,
         resultCount: finalTools.length,
         removedToolsCount: removedTools.length,
+        storeLocationsCount: storeLocations.length,
       });
-
       res.json({
         finalTools,
         removedTools,
+        storeLocations,
         searchMetadata: {
           totalFound: results.length,
           filteredByUser: removedTools.length,
           finalCount: finalTools.length,
+          storeLocationsFound: storeLocations.length,
           goodBetterBest: finalTools.length > 1,
         },
       });
