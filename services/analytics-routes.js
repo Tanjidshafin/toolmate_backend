@@ -56,7 +56,7 @@ module.exports = ({ flaggedMessagesStorage, toolsStorage, sessionsStorage, users
         .toArray()
       const totalSessions = await sessionsStorage.countDocuments({ timestamp: { $gte: startDate } })
       const totalFlags = await flaggedMessagesStorage.countDocuments({ flaggedAt: { $gte: startDate } })
-      const totalRedirects = await sessionsStorage.countDocuments({ timestamp: { $gte: startDate } }) // Assuming redirectTrackingStorage is used here
+      const totalRedirects = await sessionsStorage.countDocuments({ timestamp: { $gte: startDate } })
       const totalUsers = await usersStorage.countDocuments({ createdAt: { $gte: startDate } })
       const subscribedUsers = await usersStorage.countDocuments({ isSubscribed: true, createdAt: { $gte: startDate } })
       res.json({

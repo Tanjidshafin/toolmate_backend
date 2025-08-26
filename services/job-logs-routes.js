@@ -10,10 +10,7 @@ module.exports = (dependencies) => {
       const query = {
         userEmail: userEmail,
       };
-      const logs = await chatLogsStorage
-        .find(query)
-        .sort({ timestamp: -1 })
-        .toArray();
+      const logs = await chatLogsStorage.find(query).sort({ timestamp: -1 }).toArray();
       const total = await chatLogsStorage.countDocuments(query);
       const sessionGroups = {};
       const sessionIds = [...new Set(logs.map((log) => log.sessionId))];
@@ -59,9 +56,10 @@ module.exports = (dependencies) => {
   });
   router.get('/admin/job-logs', async (req, res) => {
     try {
-      const { page = 1, limit = 20, search, userId, dateFrom, dateTo } = req.query;
+      const { page = 1, limit = 20, search, userId, dateFrom, dateTo, lightweight } = req.query;
       const skip = (page - 1) * limit;
       const userInfo = getUserInfoFromRequest(req);
+
       const query = {};
       if (search) {
         query.$or = [
@@ -71,21 +69,38 @@ module.exports = (dependencies) => {
           { mateyResponse: { $regex: search, $options: 'i' } },
         ];
       }
+
       if (userId) {
         query.$or = [{ userEmail: userId }, { userEmail: { $in: [userId] } }];
       }
+
       if (dateFrom || dateTo) {
         query.timestamp = {};
         if (dateFrom) query.timestamp.$gte = new Date(dateFrom);
         if (dateTo) query.timestamp.$lte = new Date(dateTo);
       }
+
+      let projection = {};
+      if (lightweight === 'true') {
+        projection = {
+          _id: 1,
+          sessionId: 1,
+          userName: 1,
+          userEmail: 1,
+          timestamp: 1,
+          'metadata.notes': 1,
+        };
+      }
+
       const logs = await chatLogsStorage
-        .find(query)
+        .find(query, { projection })
         .sort({ timestamp: -1 })
         .skip(skip)
         .limit(Number.parseInt(limit))
         .toArray();
+
       const total = await chatLogsStorage.countDocuments(query);
+
       const enrichedLogs = await Promise.all(
         logs.map(async (log) => {
           const user = await usersStorage.findOne({
@@ -110,6 +125,7 @@ module.exports = (dependencies) => {
           searchQuery: search,
           filterUserId: userId,
           totalLogsFetched: enrichedLogs.length,
+          lightweight: lightweight === 'true',
         },
         ipAddress: userInfo.ipAddress,
         userAgent: userInfo.userAgent,
@@ -125,6 +141,45 @@ module.exports = (dependencies) => {
     } catch (error) {
       console.error('Error fetching admin job logs:', error);
       res.status(500).json({ error: 'Failed to fetch admin job logs' });
+    }
+  });
+
+  router.get('/admin/job-logs/:id/details', async (req, res) => {
+    try {
+      const { id } = req.params;
+      const userInfo = getUserInfoFromRequest(req);
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({ error: 'Invalid job log ID format' });
+      }
+      const log = await chatLogsStorage.findOne({ _id: new ObjectId(id) });
+      if (!log) {
+        return res.status(404).json({ error: 'Job log not found' });
+      }
+      const user = await usersStorage.findOne({
+        userEmail: { $in: Array.isArray(log.userEmail) ? log.userEmail : [log.userEmail] },
+      });
+      const enrichedLog = {
+        ...log,
+        userDetails: user || null,
+      };
+      await auditLogger.logAudit({
+        action: 'VIEW_JOB_LOG_DETAILS',
+        resource: 'job_log',
+        resourceId: id,
+        userId: userInfo.userId,
+        userEmail: userInfo.userEmail,
+        role: userInfo.role,
+        metadata: {
+          targetSessionId: log.sessionId,
+        },
+        ipAddress: userInfo.ipAddress,
+        userAgent: userInfo.userAgent,
+      });
+
+      res.json(enrichedLog);
+    } catch (error) {
+      console.error('Error fetching job log details:', error);
+      res.status(500).json({ error: 'Failed to fetch job log details' });
     }
   });
   router.put('/admin/job-logs/:id/notes', async (req, res) => {
