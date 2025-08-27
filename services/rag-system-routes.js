@@ -412,37 +412,21 @@ module.exports = ({
       }
       let storeLocations = [];
       if (finalTools.length > 0) {
-        const retailers = [...new Set(finalTools.map((tool) => tool.retailer).filter(Boolean))];
-        if (retailers.length > 0) {
-          const storeQuery = { retailer: { $in: retailers } };
-          const allStores = await storeLocationStorage.find(storeQuery).toArray();
-          if (userLat && userLon) {
-            const userLatNum = Number.parseFloat(userLat);
-            const userLonNum = Number.parseFloat(userLon);
-            const storesWithDistance = allStores
-              .map((store) => {
-                const distance = calculateDistance(userLatNum, userLonNum, store.lat, store.lon);
-                return { ...store, distance };
-              })
-              .sort((a, b) => a.distance - b.distance);
-            const storesByRetailer = {};
-            storesWithDistance.forEach((store) => {
-              if (!storesByRetailer[store.retailer] || store.distance < storesByRetailer[store.retailer].distance) {
-                storesByRetailer[store.retailer] = store;
-              }
-            });
-            storeLocations = Object.values(storesByRetailer);
-          } else {
-            const storesByRetailer = {};
-            allStores.forEach((store) => {
-              if (!storesByRetailer[store.retailer]) {
-                storesByRetailer[store.retailer] = store;
-              }
-            });
-            storeLocations = Object.values(storesByRetailer);
-          }
+        const allStores = await storeLocationStorage.find().toArray();
+        if (userLat && userLon) {
+          const userLatNum = Number.parseFloat(userLat);
+          const userLonNum = Number.parseFloat(userLon);
+          storeLocations = allStores
+            .map((store) => ({
+              ...store,
+              distance: calculateDistance(userLatNum, userLonNum, store.lat, store.lon),
+            }))
+            .sort((a, b) => a.distance - b.distance);
+        } else {
+          storeLocations = allStores;
         }
       }
+
       function calculateDistance(lat1, lon1, lat2, lon2) {
         const R = 6371;
         const dLat = ((lat2 - lat1) * Math.PI) / 180;
