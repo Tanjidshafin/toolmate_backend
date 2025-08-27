@@ -2,6 +2,7 @@ const express = require("express")
 const { ObjectId } = require("mongodb")
 module.exports = ({ auditLogger, getUserInfoFromRequest }) => {
   const router = express.Router()
+
   router.get("/admin/audit-logs", async (req, res) => {
     try {
       const {
@@ -15,8 +16,8 @@ module.exports = ({ auditLogger, getUserInfoFromRequest }) => {
         dateFrom,
         dateTo,
         resourceId,
+        lightweight = "true",
       } = req.query
-
       const result = await auditLogger.getAuditLogs({
         page: Number.parseInt(page),
         limit: Number.parseInt(limit),
@@ -28,12 +29,40 @@ module.exports = ({ auditLogger, getUserInfoFromRequest }) => {
         dateFrom,
         dateTo,
         resourceId,
+        lightweight: lightweight === "true",
       })
-
       res.json(result)
     } catch (error) {
       console.error("Error fetching audit logs:", error)
       res.status(500).json({ error: "Failed to fetch audit logs" })
+    }
+  })
+  router.get("/admin/audit-logs/:id/details", async (req, res) => {
+    try {
+      const { id } = req.params
+      const details = await auditLogger.getAuditLogDetails(id)
+      res.json(details)
+    } catch (error) {
+      console.error("Error fetching audit log details:", error)
+      res.status(500).json({ error: "Failed to fetch audit log details" })
+    }
+  })
+  router.get("/admin/audit-logs/available-actions", async (req, res) => {
+    try {
+      const actions = await auditLogger.getAvailableActions()
+      res.json({ actions })
+    } catch (error) {
+      console.error("Error fetching available actions:", error)
+      res.status(500).json({ error: "Failed to fetch available actions" })
+    }
+  })
+  router.get("/admin/audit-logs/available-resources", async (req, res) => {
+    try {
+      const resources = await auditLogger.getAvailableResources()
+      res.json({ resources })
+    } catch (error) {
+      console.error("Error fetching available resources:", error)
+      res.status(500).json({ error: "Failed to fetch available resources" })
     }
   })
   router.get("/admin/audit-stats", async (req, res) => {
@@ -46,7 +75,6 @@ module.exports = ({ auditLogger, getUserInfoFromRequest }) => {
       res.status(500).json({ error: "Failed to fetch audit statistics" })
     }
   })
-
   router.get("/admin/audit-logs/user/:userId", async (req, res) => {
     try {
       const { userId } = req.params
@@ -58,7 +86,6 @@ module.exports = ({ auditLogger, getUserInfoFromRequest }) => {
       res.status(500).json({ error: "Failed to fetch user activity" })
     }
   })
-
   router.get("/admin/audit-logs/resource/:resource/:resourceId", async (req, res) => {
     try {
       const { resource, resourceId } = req.params

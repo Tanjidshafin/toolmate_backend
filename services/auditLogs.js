@@ -40,6 +40,7 @@ class AuditLogger {
       console.error('❌ Failed to log audit entry:', error);
     }
   }
+
   async getAuditLogs({
     page = 1,
     limit = 50,
@@ -51,28 +52,42 @@ class AuditLogger {
     dateFrom = null,
     dateTo = null,
     resourceId = null,
+    lightweight = false, // Added lightweight parameter for optimized loading
   }) {
     try {
       const skip = (page - 1) * limit;
       const query = {};
+
       if (action) query.action = action.toUpperCase();
       if (resource) query.resource = resource.toLowerCase();
       if (userId) query.userId = userId;
       if (userEmail) query.userEmail = { $regex: userEmail, $options: 'i' };
       if (role) query.role = role.toLowerCase();
       if (resourceId) query.resourceId = resourceId;
+
       if (dateFrom || dateTo) {
         query.timestamp = {};
         if (dateFrom) query.timestamp.$gte = new Date(dateFrom);
         if (dateTo) query.timestamp.$lte = new Date(dateTo);
       }
+
+      const projection = lightweight
+        ? {
+            oldData: 0,
+            newData: 0,
+            metadata: 0,
+          }
+        : {};
+
       const logs = await this.auditLogsStorage
-        .find(query)
+        .find(query, { projection })
         .sort({ timestamp: -1 })
         .skip(skip)
         .limit(Number.parseInt(limit))
         .toArray();
+
       const total = await this.auditLogsStorage.countDocuments(query);
+
       return {
         logs,
         pagination: {
@@ -88,6 +103,43 @@ class AuditLogger {
       throw error;
     }
   }
+
+  async getAuditLogDetails(id) {
+    try {
+      const { ObjectId } = require('mongodb');
+      const log = await this.auditLogsStorage.findOne({ _id: new ObjectId(id) });
+
+      if (!log) {
+        throw new Error('Audit log not found');
+      }
+
+      return log;
+    } catch (error) {
+      console.error('❌ Failed to get audit log details:', error);
+      throw error;
+    }
+  }
+
+  async getAvailableActions() {
+    try {
+      const actions = await this.auditLogsStorage.distinct('action');
+      return actions.sort();
+    } catch (error) {
+      console.error('❌ Failed to get available actions:', error);
+      throw error;
+    }
+  }
+
+  async getAvailableResources() {
+    try {
+      const resources = await this.auditLogsStorage.distinct('resource');
+      return resources.sort();
+    } catch (error) {
+      console.error('❌ Failed to get available resources:', error);
+      throw error;
+    }
+  }
+
   async getAuditStats(dateFrom = null, dateTo = null) {
     try {
       const matchQuery = {};
@@ -96,6 +148,7 @@ class AuditLogger {
         if (dateFrom) matchQuery.timestamp.$gte = new Date(dateFrom);
         if (dateTo) matchQuery.timestamp.$lte = new Date(dateTo);
       }
+
       const stats = await this.auditLogsStorage
         .aggregate([
           { $match: matchQuery },
@@ -112,6 +165,7 @@ class AuditLogger {
           { $sort: { count: -1 } },
         ])
         .toArray();
+
       const actionStats = await this.auditLogsStorage
         .aggregate([
           { $match: matchQuery },
@@ -124,6 +178,7 @@ class AuditLogger {
           { $sort: { count: -1 } },
         ])
         .toArray();
+
       const resourceStats = await this.auditLogsStorage
         .aggregate([
           { $match: matchQuery },
@@ -136,6 +191,7 @@ class AuditLogger {
           { $sort: { count: -1 } },
         ])
         .toArray();
+
       const roleStats = await this.auditLogsStorage
         .aggregate([
           { $match: matchQuery },
@@ -148,7 +204,9 @@ class AuditLogger {
           { $sort: { count: -1 } },
         ])
         .toArray();
+
       const totalLogs = await this.auditLogsStorage.countDocuments(matchQuery);
+
       return {
         totalLogs,
         actionStats: actionStats.reduce((acc, stat) => {
@@ -170,16 +228,17 @@ class AuditLogger {
       throw error;
     }
   }
+
   async getUserActivity(userId, limit = 20) {
     try {
       const logs = await this.auditLogsStorage.find({ userId }).sort({ timestamp: -1 }).limit(limit).toArray();
-
       return logs;
     } catch (error) {
       console.error('❌ Failed to get user activity:', error);
       throw error;
     }
   }
+
   async getResourceActivity(resource, resourceId, limit = 20) {
     try {
       const logs = await this.auditLogsStorage
@@ -196,6 +255,7 @@ class AuditLogger {
       throw error;
     }
   }
+
   async cleanupOldLogs(daysToKeep = 365) {
     try {
       const cutoffDate = new Date();
@@ -211,4 +271,5 @@ class AuditLogger {
     }
   }
 }
+
 module.exports = AuditLogger;
