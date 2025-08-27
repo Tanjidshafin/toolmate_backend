@@ -20,8 +20,6 @@ module.exports = ({ flaggedMessagesStorage, sessionsStorage, usersStorage, audit
           $options: "i",
         }
       }
-
-      // Only return essential fields for fast loading
       const flaggedMessages = await flaggedMessagesStorage
         .find(query, {
           projection: {
@@ -29,14 +27,13 @@ module.exports = ({ flaggedMessagesStorage, sessionsStorage, usersStorage, audit
             userEmail: 1,
             status: 1,
             flaggedAt: 1,
-            messageText: 1, // Keep message text for search functionality
+            messageText: 1,
           },
         })
         .sort({ flaggedAt: -1 })
         .skip(skip)
         .limit(Number.parseInt(limit))
         .toArray()
-
       const total = await flaggedMessagesStorage.countDocuments(query)
       res.json({
         flaggedMessages,
@@ -54,15 +51,12 @@ module.exports = ({ flaggedMessagesStorage, sessionsStorage, usersStorage, audit
       })
     }
   })
-
   router.get("/admin/flagged-messages/:id/details", async (req, res) => {
     try {
       const { id } = req.params
-
       if (!ObjectId.isValid(id)) {
         return res.status(400).json({ error: "Invalid message ID format" })
       }
-
       const messageDetails = await flaggedMessagesStorage.findOne(
         { _id: new ObjectId(id) },
         {
@@ -77,11 +71,9 @@ module.exports = ({ flaggedMessagesStorage, sessionsStorage, usersStorage, audit
           },
         },
       )
-
       if (!messageDetails) {
         return res.status(404).json({ error: "Message not found" })
       }
-
       res.json(messageDetails)
     } catch (error) {
       console.error("Error fetching message details:", error)
@@ -91,7 +83,6 @@ module.exports = ({ flaggedMessagesStorage, sessionsStorage, usersStorage, audit
       })
     }
   })
-
   router.get("/admin/flagged-messages", async (req, res) => {
     try {
       const { status, page = 1, limit = 20, search } = req.query
@@ -139,7 +130,6 @@ module.exports = ({ flaggedMessagesStorage, sessionsStorage, usersStorage, audit
       const result = await flaggedMessagesStorage.deleteMany({
         expiresAt: { $lt: now },
       })
-
       // Log audit for cleanup action
       await auditLogger.logAudit({
         action: "CLEANUP",
