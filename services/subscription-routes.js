@@ -321,7 +321,7 @@ module.exports = (dependencies) => {
         const existingLog = await subscriptionStorage.findOne({
           userEmail,
           'metadata.stripeSessionId': metadata.stripeSessionId,
-          status: 'completed',
+          status: { $in: ['completed', 'cancelled'] },
         });
         if (existingLog) {
           console.warn(

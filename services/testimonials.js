@@ -158,7 +158,6 @@ module.exports = ({ testimonialsStorage, auditLogger, getUserInfoFromRequest }) 
       const { id } = req.params;
       const { moderatorEmail } = req.body;
       const userInfo = getUserInfoFromRequest(req);
-
       const testimonial = await testimonialsStorage.findOne({ _id: new ObjectId(id) });
       if (!testimonial) {
         return res.status(404).send({ message: 'Testimonial not found' });
@@ -200,7 +199,6 @@ module.exports = ({ testimonialsStorage, auditLogger, getUserInfoFromRequest }) 
   router.get('/check-user-review/:email', async (req, res) => {
     try {
       const { email } = req.params;
-
       const existingTestimonial = await testimonialsStorage.findOne({
         userEmail: email,
       });
