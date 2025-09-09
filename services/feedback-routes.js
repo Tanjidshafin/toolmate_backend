@@ -12,18 +12,11 @@ module.exports = ({
   router.post('/add-feedback', async (req, res) => {
     try {
       const data = req.body;
-      console.log('Received feedback data:', JSON.stringify(data, null, 2));
       if (!data.messageId || data.messageId === '') {
-        console.log('Missing or empty messageId');
+        console.log('[v0] Missing or empty messageId');
         return res.status(400).send({
           error: 'Missing required field: messageId',
           received: data,
-        });
-      }
-      if (!data.email) {
-        console.log('Missing email');
-        return res.status(400).send({
-          error: 'Missing required field: email',
         });
       }
       const userInfo = getUserInfoFromRequest(req);
@@ -33,19 +26,19 @@ module.exports = ({
         updatedAt: new Date(),
         flagTriggered: Boolean(data.reportStatus && data.feedback?.reasons),
       };
-      console.log('Inserting feedback:', feedbackData);
+      console.log('[v0] Inserting feedback:', feedbackData);
       const feedbackInsertResult = await feedbackStorage.insertOne(feedbackData);
-      console.log('Feedback inserted with ID:', feedbackInsertResult.insertedId);
-
-      // Prepareaudit log data
-      const userEmail = Array.isArray(data.email) ? data.email[0] : data.email;
+      console.log('[v0] Feedback inserted with ID:', feedbackInsertResult.insertedId);
+      const userEmail =
+        data.isLoggedInUser && data.email ? (Array.isArray(data.email) ? data.email[0] : data.email) : 'Anonymous';
+      // Prepare audit lg data
       const auditData = {
         action: 'CREATE',
         resource: 'feedback',
         resourceId: feedbackInsertResult.insertedId.toString(),
         userId: userEmail,
         userEmail: userEmail,
-        role: data.isLoggedInUser ? 'user' : 'anonymous',
+        role: data.isLoggedInUser ? 'user' : 'Anonymous',
         newData: {
           messageId: data.messageId,
           reportStatus: data.reportStatus,
@@ -53,9 +46,11 @@ module.exports = ({
         },
         ...userInfo,
       };
+
       await auditLogger.logAudit(auditData);
+
       if (data.reportStatus && data.feedback?.reasons) {
-        console.log('Creating flagged message for messageId:', data.messageId);
+        console.log('[v0] Creating flagged message for messageId:', data.messageId);
 
         const flaggedMessage = {
           messageId: data.messageId,
@@ -63,8 +58,8 @@ module.exports = ({
           messageTimestamp: new Date(data.messageTimestamp),
           reasons: data.feedback.reasons,
           otherReason: data.feedback.otherReason || '',
-          userEmail: data.email,
-          isLoggedInUser: data.isLoggedInUser,
+          userEmail: userEmail,
+          isLoggedInUser: Boolean(data.isLoggedInUser),
           status: 'pending',
           adminComments: '',
           flaggedAt: new Date(),
@@ -74,15 +69,15 @@ module.exports = ({
           archived: false,
         };
 
-        console.log('Flagged message data:', flaggedMessage);
+        console.log('[v0] Flagged message data:', flaggedMessage);
         const flaggedResult = await flaggedMessagesStorage.insertOne(flaggedMessage);
-        console.log('Flagged message created with ID:', flaggedResult.insertedId);
+        console.log('[v0] Flagged message created with ID:', flaggedResult.insertedId);
 
         const chatLogUpdateQuery = {
           mateyResponse: data.messageText,
-          userEmail: Array.isArray(data.email) ? { $in: data.email } : data.email,
+          userEmail: Array.isArray(data.email) ? { $in: data.email } : userEmail,
         };
-        console.log('Updating chat logs with query:', chatLogUpdateQuery);
+        console.log('[v0] Updating chat logs with query:', chatLogUpdateQuery);
 
         const chatLogUpdateResult = await chatLogsStorage.updateMany(chatLogUpdateQuery, {
           $set: {
@@ -90,7 +85,7 @@ module.exports = ({
             updatedAt: new Date(),
           },
         });
-        console.log('Chat logs update result:', chatLogUpdateResult);
+        console.log('[v0] Chat logs update result:', chatLogUpdateResult);
 
         // Log audit for flagged message
         await auditLogger.logAudit({
@@ -105,17 +100,17 @@ module.exports = ({
         });
       } else {
         console.log(
-          'No flagged message created - reportStatus:',
+          '[v0] No flagged message created - reportStatus:',
           data.reportStatus,
           'reasons:',
           data.feedback?.reasons
         );
       }
 
-      console.log('Feedback process completed successfully');
+      console.log('[v0] Feedback process completed successfully');
       res.status(200).send(feedbackInsertResult);
     } catch (err) {
-      console.error('Error adding feedback:', err);
+      console.error('[v0] Error adding feedback:', err);
       res.status(500).send({
         error: 'Failed to store feedback',
         details: err.message,
