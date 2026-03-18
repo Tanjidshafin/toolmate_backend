@@ -2,6 +2,59 @@ const express = require('express');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { format, differenceInMonths, startOfMonth, endOfMonth, addMonths, differenceInDays } = require('date-fns');
 
+const SUBSCRIPTION_GRACE_DAYS = Number.parseInt(process.env.SUBSCRIPTION_GRACE_DAYS || '3', 10);
+const ONE_TIME_SUBSCRIPTION_DAYS = Number.parseInt(process.env.ONE_TIME_SUBSCRIPTION_DAYS || '30', 10);
+
+const ACTIVE_STATUSES = new Set(['active', 'trialing']);
+
+const normalizeSubscription = (user) => {
+  const legacyActive = Boolean(user?.isSubscribed);
+  const subscription = user?.subscription || {};
+
+  return {
+    status: subscription.status || (legacyActive ? 'active' : 'inactive'),
+    plan: subscription.plan || (legacyActive ? 'premium' : 'free'),
+    billingMode: subscription.billingMode || 'auto_renew',
+    stripeCustomerId: subscription.stripeCustomerId || null,
+    stripeSubscriptionId: subscription.stripeSubscriptionId || null,
+    currentPeriodStart: subscription.currentPeriodStart ? new Date(subscription.currentPeriodStart) : null,
+    currentPeriodEnd: subscription.currentPeriodEnd ? new Date(subscription.currentPeriodEnd) : null,
+    cancelAtPeriodEnd: Boolean(subscription.cancelAtPeriodEnd),
+    gracePeriodEndsAt: subscription.gracePeriodEndsAt ? new Date(subscription.gracePeriodEndsAt) : null,
+    updatedAt: subscription.updatedAt ? new Date(subscription.updatedAt) : null,
+  };
+};
+
+const isSubscriptionEntitled = (subscription, now = new Date()) => {
+  if (!subscription) return false;
+  if (ACTIVE_STATUSES.has(subscription.status)) return true;
+
+  if (subscription.status === 'past_due' && subscription.gracePeriodEndsAt) {
+    return now <= new Date(subscription.gracePeriodEndsAt);
+  }
+
+  return false;
+};
+
+const getBillingPriceId = (billingMode) => {
+  if (billingMode === 'one_time') {
+    return process.env.STRIPE_PRICE_ID_BEST_MATES_ONE_TIME || null;
+  }
+
+  return process.env.STRIPE_PRICE_ID_BEST_MATES_RECURRING || process.env.STRIPE_PRICE_ID_BEST_MATES || null;
+};
+
+const getSafeOrigin = (req) => {
+  const rawOrigin = req.headers.origin || process.env.FRONTEND_URL || 'http://localhost:5173';
+  return rawOrigin.endsWith('/') ? rawOrigin.slice(0, -1) : rawOrigin;
+};
+
+const calculateOneTimePeriodEnd = (startDate) => {
+  const endDate = new Date(startDate);
+  endDate.setDate(endDate.getDate() + ONE_TIME_SUBSCRIPTION_DAYS);
+  return endDate;
+};
+
 module.exports = (dependencies) => {
   const {
     usersStorage,
@@ -16,6 +69,265 @@ module.exports = (dependencies) => {
   } = dependencies;
 
   const router = express.Router();
+
+  const upsertSubscriptionState = async (userEmail, nextSubscription) => {
+    const entitled = isSubscriptionEntitled(nextSubscription);
+
+    await usersStorage.updateOne(
+      { userEmail },
+      {
+        $set: {
+          subscription: {
+            ...nextSubscription,
+            updatedAt: new Date(),
+          },
+          isSubscribed: entitled,
+          updatedAt: new Date(),
+        },
+      }
+    );
+  };
+
+  const insertLogIfMissing = async ({ dedupeQuery, logEntry }) => {
+    const existingLog = await subscriptionStorage.findOne(dedupeQuery);
+    if (existingLog) {
+      return existingLog;
+    }
+
+    const result = await subscriptionStorage.insertOne(logEntry);
+    return {
+      ...logEntry,
+      _id: result.insertedId,
+    };
+  };
+
+  const upsertCheckoutSuccessLog = async (user, checkoutSession, source = 'stripe_system') => {
+    await insertLogIfMissing({
+      dedupeQuery: {
+        userEmail: user.userEmail,
+        'metadata.stripeSessionId': checkoutSession.id,
+        status: 'completed',
+        type: 'purchase',
+      },
+      logEntry: {
+      userEmail: user.userEmail,
+      userId: user.clerkId || user.userEmail,
+      clerkId: user.clerkId,
+      userName: user.userName,
+      type: 'purchase',
+      description: `${checkoutSession.metadata?.plan || 'Best Mates'} Subscription`,
+      amount: typeof checkoutSession.amount_total === 'number' ? checkoutSession.amount_total / 100 : 0,
+      currency: (checkoutSession.currency || 'AUD').toUpperCase(),
+      status: 'completed',
+      date: new Date(),
+      createdAt: new Date(),
+      metadata: {
+        stripeSessionId: checkoutSession.id,
+        stripeCustomerId: checkoutSession.customer || null,
+        stripeSubscriptionId:
+          typeof checkoutSession.subscription === 'string' ? checkoutSession.subscription : checkoutSession.subscription?.id,
+        plan: checkoutSession.metadata?.plan || 'Best Mates',
+        billingMode: checkoutSession.metadata?.billingMode || 'auto_renew',
+        source,
+      },
+      },
+    });
+  };
+
+  const upsertCheckoutCancelLog = async (userEmail, checkoutSession, source = 'checkout_cancel', reason = null) => {
+    const user = await usersStorage.findOne({ userEmail });
+    if (!user) return;
+
+    await insertLogIfMissing({
+      dedupeQuery: {
+        userEmail,
+        'metadata.stripeSessionId': checkoutSession.id,
+        status: 'checkout_cancel',
+      },
+      logEntry: {
+        userEmail,
+        userId: user.clerkId || userEmail,
+        clerkId: user.clerkId,
+        userName: user.userName,
+        type: 'checkout_cancel',
+        description: 'Checkout cancelled before payment completion',
+        amount: typeof checkoutSession.amount_total === 'number' ? checkoutSession.amount_total / 100 : 0,
+        currency: (checkoutSession.currency || 'AUD').toUpperCase(),
+        status: 'checkout_cancel',
+        date: new Date(),
+        createdAt: new Date(),
+        reason: reason || 'Checkout was cancelled',
+        metadata: {
+          stripeSessionId: checkoutSession.id,
+          stripeStatus: checkoutSession.status,
+          paymentStatus: checkoutSession.payment_status,
+          plan: checkoutSession.metadata?.plan || 'Best Mates',
+          billingMode: checkoutSession.metadata?.billingMode || 'auto_renew',
+          source,
+        },
+      },
+    });
+  };
+
+  const syncCheckoutSessionToUser = async (checkoutSession, source = 'session_verify') => {
+    const userEmail = checkoutSession.metadata?.userEmail || checkoutSession.customer_details?.email || checkoutSession.customer_email;
+    if (!userEmail) {
+      return { paid: false, error: 'Unable to resolve user from checkout session' };
+    }
+
+    const user = await usersStorage.findOne({ userEmail });
+    if (!user) {
+      return { paid: false, error: 'User not found for checkout session' };
+    }
+
+    const paid = checkoutSession.payment_status === 'paid';
+    if (!paid) {
+      return {
+        paid: false,
+        userEmail,
+        status: checkoutSession.status,
+        paymentStatus: checkoutSession.payment_status,
+      };
+    }
+
+    const nextSubscription = normalizeSubscription(user);
+    const now = new Date();
+    const billingMode = checkoutSession.metadata?.billingMode === 'one_time' ? 'one_time' : 'auto_renew';
+
+    if (billingMode === 'one_time' || checkoutSession.mode === 'payment') {
+      nextSubscription.status = 'active';
+      nextSubscription.plan = 'premium';
+      nextSubscription.billingMode = 'one_time';
+      nextSubscription.stripeCustomerId = typeof checkoutSession.customer === 'string' ? checkoutSession.customer : null;
+      nextSubscription.stripeSubscriptionId = null;
+      nextSubscription.currentPeriodStart = now;
+      nextSubscription.currentPeriodEnd = calculateOneTimePeriodEnd(now);
+      nextSubscription.cancelAtPeriodEnd = true;
+      nextSubscription.gracePeriodEndsAt = null;
+    } else {
+      const stripeSubscriptionId =
+        typeof checkoutSession.subscription === 'string'
+          ? checkoutSession.subscription
+          : checkoutSession.subscription?.id || null;
+
+      let stripeSubscription = null;
+      if (stripeSubscriptionId) {
+        stripeSubscription = await stripe.subscriptions.retrieve(stripeSubscriptionId);
+      }
+
+      nextSubscription.status = stripeSubscription?.status || 'active';
+      nextSubscription.plan = 'premium';
+      nextSubscription.billingMode = 'auto_renew';
+      nextSubscription.stripeCustomerId =
+        (stripeSubscription?.customer && typeof stripeSubscription.customer === 'string'
+          ? stripeSubscription.customer
+          : typeof checkoutSession.customer === 'string'
+          ? checkoutSession.customer
+          : null) || null;
+      nextSubscription.stripeSubscriptionId = stripeSubscriptionId;
+      nextSubscription.currentPeriodStart = stripeSubscription?.current_period_start
+        ? new Date(stripeSubscription.current_period_start * 1000)
+        : now;
+      nextSubscription.currentPeriodEnd = stripeSubscription?.current_period_end
+        ? new Date(stripeSubscription.current_period_end * 1000)
+        : calculateOneTimePeriodEnd(now);
+      nextSubscription.cancelAtPeriodEnd = Boolean(stripeSubscription?.cancel_at_period_end);
+      nextSubscription.gracePeriodEndsAt =
+        nextSubscription.status === 'past_due'
+          ? new Date(Date.now() + SUBSCRIPTION_GRACE_DAYS * 24 * 60 * 60 * 1000)
+          : null;
+    }
+
+    await upsertSubscriptionState(userEmail, nextSubscription);
+    await upsertCheckoutSuccessLog(user, checkoutSession, source);
+
+    return {
+      paid: true,
+      userEmail,
+      subscription: nextSubscription,
+      amount: typeof checkoutSession.amount_total === 'number' ? checkoutSession.amount_total / 100 : 0,
+      currency: (checkoutSession.currency || 'AUD').toUpperCase(),
+      plan: checkoutSession.metadata?.plan || 'Best Mates',
+    };
+  };
+
+  const syncStripeSubscriptionToUser = async (stripeSubscription, source = 'webhook_sync', eventId = null) => {
+    const customerId =
+      stripeSubscription.customer && typeof stripeSubscription.customer === 'string' ? stripeSubscription.customer : null;
+
+    const user = await usersStorage.findOne({
+      $or: [
+        { 'subscription.stripeSubscriptionId': stripeSubscription.id },
+        ...(customerId ? [{ 'subscription.stripeCustomerId': customerId }] : []),
+      ],
+    });
+
+    if (!user) return false;
+
+    const nextSubscription = normalizeSubscription(user);
+    nextSubscription.status = stripeSubscription.status || 'inactive';
+    nextSubscription.plan = 'premium';
+    nextSubscription.billingMode = 'auto_renew';
+    nextSubscription.stripeCustomerId = customerId;
+    nextSubscription.stripeSubscriptionId = stripeSubscription.id;
+    nextSubscription.currentPeriodStart = stripeSubscription.current_period_start
+      ? new Date(stripeSubscription.current_period_start * 1000)
+      : nextSubscription.currentPeriodStart;
+    nextSubscription.currentPeriodEnd = stripeSubscription.current_period_end
+      ? new Date(stripeSubscription.current_period_end * 1000)
+      : nextSubscription.currentPeriodEnd;
+    nextSubscription.cancelAtPeriodEnd = Boolean(stripeSubscription.cancel_at_period_end);
+    nextSubscription.gracePeriodEndsAt =
+      stripeSubscription.status === 'past_due'
+        ? new Date(Date.now() + SUBSCRIPTION_GRACE_DAYS * 24 * 60 * 60 * 1000)
+        : null;
+
+    await upsertSubscriptionState(user.userEmail, nextSubscription);
+
+    const isSubscriptionCancel = stripeSubscription.status === 'canceled';
+    const logType = isSubscriptionCancel ? 'cancellation' : 'subscription_sync';
+    const logStatus = isSubscriptionCancel ? 'subscription_cancel' : 'completed';
+
+    const dedupeQuery = eventId
+      ? {
+          userEmail: user.userEmail,
+          'metadata.stripeEventId': eventId,
+        }
+      : {
+          userEmail: user.userEmail,
+          'metadata.source': source,
+          'metadata.stripeSubscriptionId': stripeSubscription.id,
+          'metadata.stripeStatus': stripeSubscription.status,
+        };
+
+    await insertLogIfMissing({
+      dedupeQuery,
+      logEntry: {
+      userEmail: user.userEmail,
+      userId: user.clerkId || user.userEmail,
+      clerkId: user.clerkId,
+      userName: user.userName,
+      type: logType,
+      description: isSubscriptionCancel
+        ? 'Subscription cancelled via Stripe lifecycle'
+        : `Stripe subscription ${nextSubscription.status}`,
+      amount: 0,
+      currency: 'AUD',
+      status: logStatus,
+      date: new Date(),
+      createdAt: new Date(),
+      metadata: {
+        source,
+        stripeEventId: eventId,
+        stripeSubscriptionId: stripeSubscription.id,
+        stripeCustomerId: customerId,
+        stripeStatus: stripeSubscription.status,
+      },
+      },
+    });
+
+    return true;
+  };
 
   const getDateFilters = (period, startDate, endDate) => {
     let dateFilter = {};
@@ -109,15 +421,51 @@ module.exports = (dependencies) => {
   // Create Stripe Checkout Session
   router.post('/api/create-checkout-session', async (req, res) => {
     try {
-      const { userEmail, plan, amount } = req.body;
+      const { userEmail, plan, amount, billingMode } = req.body;
       if (!userEmail || !plan || !amount) {
         return res.status(400).json({ error: 'Missing required fields' });
       }
+
+      const selectedBillingMode = billingMode === 'one_time' ? 'one_time' : 'auto_renew';
+      const selectedPriceId = getBillingPriceId(selectedBillingMode);
+      if (!selectedPriceId) {
+        return res.status(500).json({ error: `Missing Stripe price ID for billing mode: ${selectedBillingMode}` });
+      }
+
       const user = await usersStorage.findOne({ userEmail });
       if (!user) {
         return res.status(404).json({ error: 'User not found' });
       }
-      const pendingLog = {
+
+      const origin = getSafeOrigin(req);
+
+      const session = await stripe.checkout.sessions.create({
+        payment_method_types: ['card'],
+        line_items: [
+          {
+            price: selectedPriceId,
+            quantity: 1,
+          },
+        ],
+        mode: selectedBillingMode === 'one_time' ? 'payment' : 'subscription',
+        success_url: `${origin}/success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${origin}/cancel?session_id={CHECKOUT_SESSION_ID}`,
+        customer_email: userEmail,
+        metadata: {
+          userEmail: userEmail,
+          plan: plan,
+          amount: amount.toString(),
+          billingMode: selectedBillingMode,
+        },
+      });
+
+      await insertLogIfMissing({
+        dedupeQuery: {
+          userEmail: userEmail,
+          'metadata.stripeSessionId': session.id,
+          status: 'pending',
+        },
+        logEntry: {
         userEmail: userEmail,
         userId: user.clerkId || userEmail,
         clerkId: user.clerkId,
@@ -132,32 +480,158 @@ module.exports = (dependencies) => {
         metadata: {
           plan: plan,
           addedBy: 'stripe_checkout',
+          stripeSessionId: session.id,
+          billingMode: selectedBillingMode,
         },
-      };
-      await subscriptionStorage.insertOne(pendingLog);
-      const session = await stripe.checkout.sessions.create({
-        payment_method_types: ['card'],
-        line_items: [
-          {
-            price: process.env.STRIPE_PRICE_ID_BEST_MATES,
-            quantity: 1,
-          },
-        ],
-        mode: 'subscription',
-        success_url: `${req.headers.origin}/success?session_id={CHECKOUT_SESSION_ID}&userEmail=${userEmail}&plan=${plan}&amount=${amount}&payment_status=paid`,
-        cancel_url: `${req.headers.origin}/cancel?session_id={CHECKOUT_SESSION_ID}&userEmail=${userEmail}&plan=${plan}&amount=${amount}&payment_status=cancelled`,
-        customer_email: userEmail,
-        metadata: {
-          userEmail: userEmail,
-          plan: plan,
-          amount: amount.toString(),
         },
       });
+
       res.json({ sessionId: session.id, url: session.url });
     } catch (error) {
+      console.error('create-checkout-session error:', error);
       res.status(500).json({ error: 'Failed to create checkout session' });
     }
   });
+
+  router.get('/api/subscription/checkout-session/:sessionId/verify', async (req, res) => {
+    try {
+      const { sessionId } = req.params;
+      const { intent } = req.query;
+      if (!sessionId) {
+        return res.status(400).json({ error: 'sessionId is required' });
+      }
+
+      const checkoutSession = await stripe.checkout.sessions.retrieve(sessionId, {
+        expand: ['subscription', 'payment_intent'],
+      });
+
+      const syncResult = await syncCheckoutSessionToUser(checkoutSession, 'checkout_verify');
+
+      if (!syncResult.paid) {
+        const checkoutStatus = syncResult.status || checkoutSession.status;
+        const shouldLogCheckoutCancel = intent === 'cancel' || checkoutStatus === 'expired';
+
+        if (shouldLogCheckoutCancel) {
+          const emailForCancel = syncResult.userEmail || checkoutSession.metadata?.userEmail || null;
+          if (emailForCancel) {
+            await upsertCheckoutCancelLog(emailForCancel, checkoutSession, 'checkout_verify', 'User cancelled checkout');
+          }
+        }
+
+        return res.status(200).json({
+          success: true,
+          paid: false,
+          status: checkoutStatus,
+          paymentStatus: syncResult.paymentStatus || checkoutSession.payment_status,
+          userEmail: syncResult.userEmail || checkoutSession.metadata?.userEmail || null,
+          plan: checkoutSession.metadata?.plan || null,
+          billingMode: checkoutSession.metadata?.billingMode || null,
+          amount: typeof checkoutSession.amount_total === 'number' ? checkoutSession.amount_total / 100 : 0,
+          currency: (checkoutSession.currency || 'AUD').toUpperCase(),
+        });
+      }
+
+      return res.json({
+        success: true,
+        paid: true,
+        userEmail: syncResult.userEmail,
+        plan: syncResult.plan,
+        amount: syncResult.amount,
+        currency: syncResult.currency,
+        subscription: syncResult.subscription,
+      });
+    } catch (error) {
+      console.error('checkout verify error:', error);
+      return res.status(500).json({ error: 'Failed to verify checkout session' });
+    }
+  });
+
+  router.post('/api/webhooks/stripe', async (req, res) => {
+    try {
+      if (!process.env.STRIPE_WEBHOOK_SECRET) {
+        return res.status(500).send('Webhook secret is not configured');
+      }
+
+      const signature = req.headers['stripe-signature'];
+      if (!signature || !req.rawBody) {
+        return res.status(400).send('Missing stripe-signature or raw body');
+      }
+
+      let event;
+      try {
+        event = stripe.webhooks.constructEvent(req.rawBody, signature, process.env.STRIPE_WEBHOOK_SECRET);
+      } catch (err) {
+        console.error('Stripe webhook signature verification failed:', err.message);
+        return res.status(400).send(`Webhook Error: ${err.message}`);
+      }
+
+      switch (event.type) {
+        case 'checkout.session.completed': {
+          const checkoutSession = event.data.object;
+          await syncCheckoutSessionToUser(checkoutSession, 'webhook_checkout_completed');
+          break;
+        }
+
+        case 'checkout.session.expired': {
+          const checkoutSession = event.data.object;
+          const checkoutEmail =
+            checkoutSession.metadata?.userEmail || checkoutSession.customer_details?.email || checkoutSession.customer_email;
+
+          if (checkoutEmail) {
+            await upsertCheckoutCancelLog(checkoutEmail, checkoutSession, 'webhook_checkout_expired', 'Checkout session expired');
+          }
+          break;
+        }
+
+        case 'invoice.payment_succeeded': {
+          const invoice = event.data.object;
+          if (invoice.subscription) {
+            const stripeSubscription = await stripe.subscriptions.retrieve(invoice.subscription);
+            await syncStripeSubscriptionToUser(stripeSubscription, 'webhook_invoice_paid', event.id);
+          }
+          break;
+        }
+
+        case 'invoice.payment_failed': {
+          const invoice = event.data.object;
+          const stripeSubscriptionId =
+            typeof invoice.subscription === 'string' ? invoice.subscription : invoice.subscription?.id || null;
+          const customerId = typeof invoice.customer === 'string' ? invoice.customer : null;
+
+          const user = await usersStorage.findOne({
+            $or: [
+              ...(stripeSubscriptionId ? [{ 'subscription.stripeSubscriptionId': stripeSubscriptionId }] : []),
+              ...(customerId ? [{ 'subscription.stripeCustomerId': customerId }] : []),
+            ],
+          });
+
+          if (user) {
+            const nextSubscription = normalizeSubscription(user);
+            nextSubscription.status = 'past_due';
+            nextSubscription.gracePeriodEndsAt = new Date(Date.now() + SUBSCRIPTION_GRACE_DAYS * 24 * 60 * 60 * 1000);
+            await upsertSubscriptionState(user.userEmail, nextSubscription);
+          }
+          break;
+        }
+
+        case 'customer.subscription.updated':
+        case 'customer.subscription.deleted': {
+          const stripeSubscription = event.data.object;
+          await syncStripeSubscriptionToUser(stripeSubscription, `webhook_${event.type}`, event.id);
+          break;
+        }
+
+        default:
+          break;
+      }
+
+      return res.json({ received: true });
+    } catch (error) {
+      console.error('stripe webhook processing error:', error);
+      return res.status(500).json({ error: 'Failed to process webhook' });
+    }
+  });
+
   router.get('/api/subscription/:userEmail', async (req, res) => {
     try {
       const { userEmail } = req.params;
@@ -230,6 +704,29 @@ module.exports = (dependencies) => {
       } catch (error) {
         console.log(error);
       }
+      const normalizedSubscription = normalizeSubscription(user);
+      const now = new Date();
+
+      const shouldExpireOneTime =
+        normalizedSubscription.status === 'active' &&
+        normalizedSubscription.billingMode === 'one_time' &&
+        normalizedSubscription.currentPeriodEnd &&
+        now > new Date(normalizedSubscription.currentPeriodEnd);
+
+      const shouldExpireGrace =
+        normalizedSubscription.status === 'past_due' &&
+        normalizedSubscription.gracePeriodEndsAt &&
+        now > new Date(normalizedSubscription.gracePeriodEndsAt);
+
+      if (shouldExpireOneTime || shouldExpireGrace) {
+        normalizedSubscription.status = 'inactive';
+        normalizedSubscription.plan = 'free';
+        normalizedSubscription.gracePeriodEndsAt = null;
+        await upsertSubscriptionState(userEmail, normalizedSubscription);
+      }
+
+      const entitled = isSubscriptionEntitled(normalizedSubscription, now);
+
       const subscriptionData = {
         user: {
           id: user._id,
@@ -242,13 +739,16 @@ module.exports = (dependencies) => {
           isBanned: user.isBanned || false,
         },
         subscription: {
-          isActive: user.isSubscribed || false,
-          status: user.isSubscribed ? 'active' : 'inactive',
-          plan: user.isSubscribed ? 'premium' : 'free',
-          startDate: user.createdAt || null,
-          endDate: null,
-          customerId: null,
-          subscriptionId: null,
+          isActive: entitled,
+          status: normalizedSubscription.status,
+          plan: normalizedSubscription.plan,
+          billingMode: normalizedSubscription.billingMode,
+          startDate: normalizedSubscription.currentPeriodStart || user.createdAt || null,
+          endDate: normalizedSubscription.currentPeriodEnd || null,
+          customerId: normalizedSubscription.stripeCustomerId,
+          subscriptionId: normalizedSubscription.stripeSubscriptionId,
+          cancelAtPeriodEnd: normalizedSubscription.cancelAtPeriodEnd,
+          gracePeriodEndsAt: normalizedSubscription.gracePeriodEndsAt,
         },
         usage: {
           totalSessions,
@@ -317,15 +817,29 @@ module.exports = (dependencies) => {
       const { userEmail } = req.params;
       const { type, description, amount, currency, status, reason, feedback, metadata } = req.body;
       const userInfo = getUserInfoFromRequest(req);
+      if (metadata?.idempotencyKey) {
+        const existingByIdempotencyKey = await subscriptionStorage.findOne({
+          userEmail,
+          'metadata.idempotencyKey': metadata.idempotencyKey,
+        });
+        if (existingByIdempotencyKey) {
+          return res.status(200).json({
+            success: true,
+            message: 'Purchase log already recorded',
+            logId: existingByIdempotencyKey._id.toString(),
+          });
+        }
+      }
+
       if (metadata?.stripeSessionId) {
         const existingLog = await subscriptionStorage.findOne({
           userEmail,
           'metadata.stripeSessionId': metadata.stripeSessionId,
-          status: { $in: ['completed', 'cancelled'] },
+          status: status || 'completed',
         });
         if (existingLog) {
           console.warn(
-            `Duplicate purchase log attempt detected for user: ${userEmail}, stripeSessionId: ${metadata.stripeSessionId}. Returning existing log.`
+            `Duplicate purchase log attempt detected for user: ${userEmail}, stripeSessionId: ${metadata.stripeSessionId}, status: ${status || 'completed'}. Returning existing log.`
           );
           return res.status(200).json({
             success: true,
@@ -369,7 +883,7 @@ module.exports = (dependencies) => {
         },
       };
       const result = await subscriptionStorage.insertOne(logEntry);
-      if (type === 'purchase') {
+      if (type === 'purchase' && metadata?.source === 'trusted_webhook') {
         await usersStorage.updateOne({ userEmail }, { $set: { isSubscribed: true } });
       }
       await auditLogger.logAudit({
@@ -411,29 +925,69 @@ module.exports = (dependencies) => {
       if (!user) {
         return res.status(404).json({ error: 'User not found' });
       }
-      if (!user.isSubscribed) {
+      const currentSubscription = normalizeSubscription(user);
+      if (!isSubscriptionEntitled(currentSubscription)) {
         return res.status(400).json({ error: 'No active subscription to cancel' });
       }
-      // Update user subscription status
+
+      let nextSubscription = {
+        ...currentSubscription,
+      };
+
+      if (currentSubscription.billingMode === 'auto_renew' && currentSubscription.stripeSubscriptionId) {
+        const stripeSubscription = await stripe.subscriptions.update(currentSubscription.stripeSubscriptionId, {
+          cancel_at_period_end: true,
+        });
+
+        nextSubscription = {
+          ...nextSubscription,
+          status: stripeSubscription.status || nextSubscription.status,
+          currentPeriodEnd: stripeSubscription.current_period_end
+            ? new Date(stripeSubscription.current_period_end * 1000)
+            : nextSubscription.currentPeriodEnd,
+          cancelAtPeriodEnd: true,
+          stripeCustomerId:
+            stripeSubscription.customer && typeof stripeSubscription.customer === 'string'
+              ? stripeSubscription.customer
+              : nextSubscription.stripeCustomerId,
+        };
+      } else {
+        nextSubscription = {
+          ...nextSubscription,
+          cancelAtPeriodEnd: true,
+          currentPeriodEnd: nextSubscription.currentPeriodEnd || calculateOneTimePeriodEnd(new Date()),
+        };
+      }
+
+      const entitlementAfterCancel = isSubscriptionEntitled(nextSubscription);
+
       const updateData = {
-        isSubscribed: false,
+        isSubscribed: entitlementAfterCancel,
+        subscription: {
+          ...nextSubscription,
+          updatedAt: new Date(),
+        },
         subscriptionCancelledAt: new Date(),
         subscriptionCancelReason: reason || 'User requested cancellation',
         subscriptionCancelFeedback: feedback || null,
         updatedAt: new Date(),
       };
       await usersStorage.updateOne({ userEmail }, { $set: updateData });
-      // Add cancellation log to subscriptionStorage
+      // Add cancellation log to subscriptionStorage (idempotent)
+      const subscriptionCancelKey = `${userEmail}:${nextSubscription.stripeSubscriptionId || 'one_time'}:${
+        nextSubscription.currentPeriodEnd ? new Date(nextSubscription.currentPeriodEnd).toISOString() : 'na'
+      }`;
+
       const cancellationLog = {
         userEmail: userEmail,
         userId: user.clerkId || userEmail,
         clerkId: user.clerkId,
         userName: user.userName,
         type: 'cancellation',
-        description: 'Subscription cancelled',
+        description: 'Subscription cancellation requested',
         amount: 0,
         currency: 'AUD',
-        status: 'completed',
+        status: 'subscription_cancel',
         date: new Date(),
         createdAt: new Date(),
         reason: reason || 'User requested cancellation',
@@ -441,9 +995,19 @@ module.exports = (dependencies) => {
         metadata: {
           ...userInfo,
           previousPlan: user.isSubscribed ? 'premium' : 'free',
+          idempotencyKey: subscriptionCancelKey,
+          stripeSubscriptionId: nextSubscription.stripeSubscriptionId,
         },
       };
-      await subscriptionStorage.insertOne(cancellationLog);
+
+      await insertLogIfMissing({
+        dedupeQuery: {
+          userEmail,
+          'metadata.idempotencyKey': subscriptionCancelKey,
+          status: 'subscription_cancel',
+        },
+        logEntry: cancellationLog,
+      });
       // Log audit trail
       await auditLogger.logAudit({
         action: 'CANCEL_SUBSCRIPTION',
@@ -464,8 +1028,12 @@ module.exports = (dependencies) => {
       });
       res.json({
         success: true,
-        message: 'Subscription cancelled successfully',
+        message:
+          nextSubscription.cancelAtPeriodEnd && nextSubscription.currentPeriodEnd
+            ? 'Subscription will end at the current billing period end'
+            : 'Subscription cancelled successfully',
         cancellationDate: new Date(),
+        effectiveEndDate: nextSubscription.currentPeriodEnd,
         refundEligible: false,
       });
     } catch (error) {
@@ -488,9 +1056,21 @@ module.exports = (dependencies) => {
       if (user.isSubscribed) {
         return res.status(400).json({ error: 'Subscription is already active' });
       }
+      const currentSubscription = normalizeSubscription(user);
+
       // Update user subscription status
       const updateData = {
         isSubscribed: true,
+        subscription: {
+          ...currentSubscription,
+          status: 'active',
+          plan: 'premium',
+          cancelAtPeriodEnd: false,
+          gracePeriodEndsAt: null,
+          currentPeriodStart: currentSubscription.currentPeriodStart || new Date(),
+          currentPeriodEnd: currentSubscription.currentPeriodEnd || calculateOneTimePeriodEnd(new Date()),
+          updatedAt: new Date(),
+        },
         subscriptionReactivatedAt: new Date(),
         updatedAt: new Date(),
       };
@@ -536,6 +1116,11 @@ module.exports = (dependencies) => {
     } catch (error) {
       res.status(500).json({ error: 'Failed to reactivate subscription' });
     }
+  });
+
+  router.get('/api/subscription/:userEmail/usage', async (req, res) => {
+    const { userEmail } = req.params;
+    return res.redirect(307, `/api/subscription/${encodeURIComponent(userEmail)}/usage-details`);
   });
 
   router.get('/api/subscription/:userEmail/usage-details', async (req, res) => {

@@ -1,5 +1,5 @@
-const express = require("express")
-const { ObjectId } = require("mongodb")
+const express = require('express');
+const { ObjectId } = require('mongodb');
 module.exports = ({
   ragSystemStorage,
   shedToolsStorage,
@@ -10,38 +10,38 @@ module.exports = ({
   devTestOverrideStorage,
   io,
 }) => {
-  const router = express.Router()
-  router.get("/admin/rag-system", async (req, res) => {
+  const router = express.Router();
+  router.get('/admin/rag-system', async (req, res) => {
     try {
-      const { page = 1, limit = 10, search } = req.query
-      const skip = (Number.parseInt(page) - 1) * Number.parseInt(limit)
-      let searchQuery = {}
-      let ragSettings = []
-      let totalCount = 0
+      const { page = 1, limit = 10, search } = req.query;
+      const skip = (Number.parseInt(page) - 1) * Number.parseInt(limit);
+      let searchQuery = {};
+      let ragSettings = [];
+      let totalCount = 0;
       if (search && search.trim()) {
-        const searchTerm = search.trim()
+        const searchTerm = search.trim();
         searchQuery = {
           $or: [
-            { product_name: { $regex: searchTerm, $options: "i" } },
-            { display_name: { $regex: searchTerm, $options: "i" } },
-            { id: { $regex: searchTerm, $options: "i" } },
+            { product_name: { $regex: searchTerm, $options: 'i' } },
+            { display_name: { $regex: searchTerm, $options: 'i' } },
+            { id: { $regex: searchTerm, $options: 'i' } },
           ],
-        }
-        const matchedDocs = await ragSystemStorage.find(searchQuery).toArray()
-        totalCount = matchedDocs.length
-        ragSettings = matchedDocs.slice(skip, skip + Number.parseInt(limit))
+        };
+        const matchedDocs = await ragSystemStorage.find(searchQuery).toArray();
+        totalCount = matchedDocs.length;
+        ragSettings = matchedDocs.slice(skip, skip + Number.parseInt(limit));
       } else {
-        totalCount = await ragSystemStorage.countDocuments()
-        ragSettings = await ragSystemStorage.find().skip(skip).limit(Number.parseInt(limit)).toArray()
+        totalCount = await ragSystemStorage.countDocuments();
+        ragSettings = await ragSystemStorage.find().skip(skip).limit(Number.parseInt(limit)).toArray();
       }
       await toolAnalyticsStorage.insertOne({
-        type: "admin_access",
-        resource: "rag_system",
+        type: 'admin_access',
+        resource: 'rag_system',
         timestamp: new Date(),
         userInfo: getUserInfoFromRequest(req),
         searchTerm: search || null,
         resultCount: ragSettings.length,
-      })
+      });
       res.json({
         data: ragSettings,
         pagination: {
@@ -50,19 +50,19 @@ module.exports = ({
           totalItems: totalCount,
           itemsPerPage: Number.parseInt(limit),
         },
-      })
+      });
     } catch (error) {
-      console.error("Error fetching RAG settings:", error)
-      res.status(500).json({ error: "Failed to fetch RAG settings" })
+      console.error('Error fetching RAG settings:', error);
+      res.status(500).json({ error: 'Failed to fetch RAG settings' });
     }
-  })
+  });
 
-  router.put("/admin/rag-system/tool/:id/visibility", async (req, res) => {
+  router.put('/admin/rag-system/tool/:id/visibility', async (req, res) => {
     try {
-      const { id } = req.params
-      const { hidden, suppressed, updatedBy } = req.body
-      const userInfo = getUserInfoFromRequest(req)
-      const existingTool = await ragSystemStorage.findOne({ id })
+      const { id } = req.params;
+      const { hidden, suppressed, updatedBy } = req.body;
+      const userInfo = getUserInfoFromRequest(req);
+      const existingTool = await ragSystemStorage.findOne({ id });
       await ragSystemStorage.updateOne(
         { id },
         {
@@ -71,63 +71,63 @@ module.exports = ({
             hidden: hidden || false,
             suppressed: suppressed || false,
             updatedAt: new Date(),
-            updatedBy: updatedBy || "admin",
+            updatedBy: updatedBy || 'admin',
           },
         },
-        { upsert: true },
-      )
-      io.to("admin-monitoring").emit("tool-visibility-updated", {
+        { upsert: true }
+      );
+      io.to('admin-monitoring').emit('tool-visibility-updated', {
         toolId: id,
         hidden,
         suppressed,
         timestamp: new Date(),
-      })
+      });
       await auditLogger.logAudit({
-        action: "UPDATE",
-        resource: "rag_tool_visibility",
+        action: 'UPDATE',
+        resource: 'rag_tool_visibility',
         resourceId: id,
-        userId: updatedBy || "admin",
-        userEmail: "admin@toolmate.com",
-        role: "admin",
+        userId: updatedBy || 'admin',
+        userEmail: 'admin@toolmate.com',
+        role: 'admin',
         oldData: existingTool,
-        newData: { hidden, suppressed, updatedAt: new Date(), updatedBy: updatedBy || "admin" },
+        newData: { hidden, suppressed, updatedAt: new Date(), updatedBy: updatedBy || 'admin' },
         metadata: {
           toolId: id,
-          visibilityChange: hidden ? "hidden" : suppressed ? "suppressed" : "visible",
+          visibilityChange: hidden ? 'hidden' : suppressed ? 'suppressed' : 'visible',
           adminAction: true,
         },
         ...userInfo,
-      })
-      res.json({ success: true, message: "Tool visibility updated" })
+      });
+      res.json({ success: true, message: 'Tool visibility updated' });
     } catch (error) {
-      console.error("Error updating tool visibility:", error)
-      res.status(500).json({ error: "Failed to update tool visibility" })
+      console.error('Error updating tool visibility:', error);
+      res.status(500).json({ error: 'Failed to update tool visibility' });
     }
-  })
-  router.put("/admin/rag-system/tool/:id/boost", async (req, res) => {
+  });
+  router.put('/admin/rag-system/tool/:id/boost', async (req, res) => {
     try {
-      const { id } = req.params
-      const { boosted, duration, promoExpiry, updatedBy } = req.body
-      const userInfo = getUserInfoFromRequest(req)
-      const existingTool = await ragSystemStorage.findOne({ id })
-      let boostExpiry = null
+      const { id } = req.params;
+      const { boosted, duration, promoExpiry, updatedBy } = req.body;
+      const userInfo = getUserInfoFromRequest(req);
+      const existingTool = await ragSystemStorage.findOne({ id });
+      let boostExpiry = null;
       if (boosted && duration) {
-        boostExpiry = new Date()
-        boostExpiry.setMilliseconds(boostExpiry.getMilliseconds() + duration * 60 * 60 * 1000)
+        boostExpiry = new Date();
+        boostExpiry.setMilliseconds(boostExpiry.getMilliseconds() + duration * 60 * 60 * 1000);
       }
       const updateData = {
         id,
         boosted,
         boostExpiry,
         updatedAt: new Date(),
-        updatedBy: updatedBy || "admin",
-      }
+        updatedBy: updatedBy || 'admin',
+      };
       if (promoExpiry) {
-        updateData.promoExpiry = new Date(promoExpiry)
+        updateData.promoExpiry = new Date(promoExpiry);
       }
-      await ragSystemStorage.updateOne({ id }, { $set: updateData }, { upsert: true })
+      await ragSystemStorage.updateOne({ id }, { $set: updateData }, { upsert: true });
 
-      io.to("admin-monitoring").emit("tool-boost-updated", {
+      io.to('admin-monitoring').emit('tool-boost-updated', {
         toolId: id,
         boosted,
         boostExpiry,
@@ -135,221 +135,221 @@ module.exports = ({
         timestamp: new Date(),
         toolName: existingTool?.name || id,
         duration: duration || null,
-        action: boosted ? "boosted" : "unboosted",
+        action: boosted ? 'boosted' : 'unboosted',
         remainingTime: boostExpiry ? boostExpiry.getTime() - new Date().getTime() : null,
-      })
+      });
 
-      io.emit("boost-status-changed", {
+      io.emit('boost-status-changed', {
         toolId: id,
         toolName: existingTool?.name || id,
         boosted,
         boostExpiry,
         timestamp: new Date(),
-      })
+      });
 
       await auditLogger.logAudit({
-        action: "UPDATE",
-        resource: "rag_tool_boost",
+        action: 'UPDATE',
+        resource: 'rag_tool_boost',
         resourceId: id,
-        userId: updatedBy || "admin",
-        userEmail: "admin@toolmate.com",
-        role: "admin",
+        userId: updatedBy || 'admin',
+        userEmail: 'admin@toolmate.com',
+        role: 'admin',
         oldData: existingTool,
         newData: updateData,
         metadata: {
           toolId: id,
-          boostStatus: boosted ? "boosted" : "unboosted",
+          boostStatus: boosted ? 'boosted' : 'unboosted',
           boostDuration: duration,
           promoExpiry: promoExpiry,
           adminAction: true,
         },
         ...userInfo,
-      })
-      res.json({ success: true, message: "Tool boost updated", boostExpiry })
+      });
+      res.json({ success: true, message: 'Tool boost updated', boostExpiry });
     } catch (error) {
-      console.error("Error updating tool boost:", error)
-      res.status(500).json({ error: "Failed to update tool boost" })
+      console.error('Error updating tool boost:', error);
+      res.status(500).json({ error: 'Failed to update tool boost' });
     }
-  })
+  });
 
-  router.put("/admin/rag-system/tool/:id/details", async (req, res) => {
+  router.put('/admin/rag-system/tool/:id/details', async (req, res) => {
     try {
-      const { id } = req.params
-      const { name, description, category, budgetTier, toolType, pricing, updatedBy } = req.body
-      const userInfo = getUserInfoFromRequest(req)
-      const existingTool = await ragSystemStorage.findOne({ id })
+      const { id } = req.params;
+      const { name, description, category, budgetTier, toolType, pricing, updatedBy } = req.body;
+      const userInfo = getUserInfoFromRequest(req);
+      const existingTool = await ragSystemStorage.findOne({ id });
       const updateData = {
         updatedAt: new Date(),
-        updatedBy: updatedBy || "admin",
-      }
-      if (name !== undefined) updateData.product_name = name
-      if (name !== undefined) updateData.display_name = name
-      if (description !== undefined) updateData.product_type = description
-      if (category !== undefined) updateData.retailer = category
-      if (toolType !== undefined) updateData.toolType = toolType
+        updatedBy: updatedBy || 'admin',
+      };
+      if (name !== undefined) updateData.product_name = name;
+      if (name !== undefined) updateData.display_name = name;
+      if (description !== undefined) updateData.product_type = description;
+      if (category !== undefined) updateData.retailer = category;
+      if (toolType !== undefined) updateData.toolType = toolType;
       if (budgetTier !== undefined) {
         const riskLevelMap = {
-          low: "Low",
-          medium: "Medium",
-          hard: "Hard",
-          Low: "Low",
-          Medium: "Medium",
-          Hard: "Hard",
-        }
-        updateData.risk_level = riskLevelMap[budgetTier] || budgetTier
+          low: 'Low',
+          medium: 'Medium',
+          hard: 'Hard',
+          Low: 'Low',
+          Medium: 'Medium',
+          Hard: 'Hard',
+        };
+        updateData.risk_level = riskLevelMap[budgetTier] || budgetTier;
       }
-      if (pricing !== undefined) updateData.pricing = pricing
+      if (pricing !== undefined) updateData.pricing = pricing;
 
-      await ragSystemStorage.updateOne({ id }, { $set: updateData })
-      io.to("admin-monitoring").emit("tool-details-updated", {
+      await ragSystemStorage.updateOne({ id }, { $set: updateData });
+      io.to('admin-monitoring').emit('tool-details-updated', {
         toolId: id,
-        updatedFields: Object.keys(updateData).filter((k) => k !== "updatedAt" && k !== "updatedBy"),
+        updatedFields: Object.keys(updateData).filter((k) => k !== 'updatedAt' && k !== 'updatedBy'),
         timestamp: new Date(),
-      })
+      });
       await auditLogger.logAudit({
-        action: "UPDATE",
-        resource: "rag_tool_details",
+        action: 'UPDATE',
+        resource: 'rag_tool_details',
         resourceId: id,
-        userId: updatedBy || "admin",
-        userEmail: "admin@toolmate.com",
-        role: "admin",
+        userId: updatedBy || 'admin',
+        userEmail: 'admin@toolmate.com',
+        role: 'admin',
         oldData: existingTool,
         newData: updateData,
         metadata: {
           toolId: id,
-          updatedFields: Object.keys(updateData).filter((k) => k !== "updatedAt" && k !== "updatedBy"),
+          updatedFields: Object.keys(updateData).filter((k) => k !== 'updatedAt' && k !== 'updatedBy'),
           adminAction: true,
         },
         ...userInfo,
-      })
-      res.json({ success: true, message: "Tool details updated" })
+      });
+      res.json({ success: true, message: 'Tool details updated' });
     } catch (error) {
-      console.error("Error updating tool details:", error)
-      res.status(500).json({ error: "Failed to update tool details" })
+      console.error('Error updating tool details:', error);
+      res.status(500).json({ error: 'Failed to update tool details' });
     }
-  })
+  });
 
-  router.get("/rag-system/boosted-tools", async (req, res) => {
+  router.get('/rag-system/boosted-tools', async (req, res) => {
     try {
       const boostedTools = await ragSystemStorage
         .find({
           boosted: true,
           $or: [{ boostExpiry: null }, { boostExpiry: { $gt: new Date() } }],
         })
-        .toArray()
-      res.json(boostedTools)
+        .toArray();
+      res.json(boostedTools);
     } catch (error) {
-      console.error("Error fetching boosted tools:", error)
-      res.status(500).json({ error: "Failed to fetch boosted tools" })
+      console.error('Error fetching boosted tools:', error);
+      res.status(500).json({ error: 'Failed to fetch boosted tools' });
     }
-  })
-  router.get("/rag-system/hidden-tools", async (req, res) => {
+  });
+  router.get('/rag-system/hidden-tools', async (req, res) => {
     try {
-      const hiddenTools = await ragSystemStorage.find({ hidden: true }).toArray()
-      res.json(hiddenTools)
+      const hiddenTools = await ragSystemStorage.find({ hidden: true }).toArray();
+      res.json(hiddenTools);
     } catch (error) {
-      console.error("Error fetching hidden tools:", error)
-      res.status(500).json({ error: "Failed to fetch hidden tools" })
+      console.error('Error fetching hidden tools:', error);
+      res.status(500).json({ error: 'Failed to fetch hidden tools' });
     }
-  })
-  router.get("/rag-system/ordered-tools", async (req, res) => {
+  });
+  router.get('/rag-system/ordered-tools', async (req, res) => {
     try {
-      const now = new Date()
-      const tools = await ragSystemStorage.find({ hidden: { $ne: true } }).toArray()
-      const boosted = []
-      const others = []
+      const now = new Date();
+      const tools = await ragSystemStorage.find({ hidden: { $ne: true } }).toArray();
+      const boosted = [];
+      const others = [];
       for (const tool of tools) {
         if (tool.boosted === true && (!tool.boostExpiry || new Date(tool.boostExpiry) > now)) {
-          boosted.push(tool)
+          boosted.push(tool);
         } else {
-          others.push(tool)
+          others.push(tool);
         }
       }
-      const orderedTools = [...boosted, ...others]
-      res.json(orderedTools)
+      const orderedTools = [...boosted, ...others];
+      res.json(orderedTools);
     } catch (error) {
-      console.error("Error fetching ordered tools:", error)
-      res.status(500).json({ error: "Failed to fetch ordered tools" })
+      console.error('Error fetching ordered tools:', error);
+      res.status(500).json({ error: 'Failed to fetch ordered tools' });
     }
-  })
+  });
 
-  router.get("/rag-system/filtered-tools", async (req, res) => {
+  router.get('/rag-system/filtered-tools', async (req, res) => {
     try {
-      const { risk_level, productNames, userID, lat, lon } = req.query
-      const userLat = Number(lat)
-      const userLon = Number(lon)
+      const { risk_level, productNames, userID, lat, lon } = req.query;
+      const userLat = Number(lat);
+      const userLon = Number(lon);
       const initialMatchQuery = {
         hidden: { $ne: true },
         suppressed: { $ne: true },
-      }
+      };
 
       if (risk_level) {
-        let riskLevelsToInclude = []
-        if (risk_level === "Low") riskLevelsToInclude = ["Low"]
-        else if (risk_level === "Medium") riskLevelsToInclude = ["Low", "Medium"]
-        else if (risk_level === "Hard") riskLevelsToInclude = ["Low", "Medium", "Hard"]
+        let riskLevelsToInclude = [];
+        if (risk_level === 'Low') riskLevelsToInclude = ['Low'];
+        else if (risk_level === 'Medium') riskLevelsToInclude = ['Low', 'Medium'];
+        else if (risk_level === 'Hard') riskLevelsToInclude = ['Low', 'Medium', 'Hard'];
 
         if (riskLevelsToInclude.length > 0) {
-          initialMatchQuery.risk_level = { $in: riskLevelsToInclude }
+          initialMatchQuery.risk_level = { $in: riskLevelsToInclude };
         }
       }
 
-      const searchTerms = []
+      const searchTerms = [];
       if (productNames) {
         searchTerms.push(
           ...productNames
-            .split(",")
+            .split(',')
             .map((t) => t.trim())
-            .filter((t) => t && t.toLowerCase() !== "i"),
-        )
+            .filter((t) => t && t.toLowerCase() !== 'i')
+        );
       }
 
       if (searchTerms.length > 0) {
         initialMatchQuery.$or = searchTerms.flatMap((term) => [
-          { product_name: { $regex: term, $options: "i" } },
-          { product_type: { $regex: term, $options: "i" } },
-          { retailer: { $regex: term, $options: "i" } },
-        ])
+          { product_name: { $regex: term, $options: 'i' } },
+          { product_type: { $regex: term, $options: 'i' } },
+          { retailer: { $regex: term, $options: 'i' } },
+        ]);
       }
 
-      const pipeline = [{ $match: initialMatchQuery }, { $limit: 1000 }]
+      const pipeline = [{ $match: initialMatchQuery }, { $limit: 1000 }];
 
       if (searchTerms.length > 0) {
         const keywordRelevantOrConditions = searchTerms.flatMap((term) => [
-          { $regexMatch: { input: "$product_name", regex: term, options: "i" } },
-          { $regexMatch: { input: "$product_type", regex: term, options: "i" } },
-          { $regexMatch: { input: "$retailer", regex: term, options: "i" } },
-        ])
+          { $regexMatch: { input: '$product_name', regex: term, options: 'i' } },
+          { $regexMatch: { input: '$product_type', regex: term, options: 'i' } },
+          { $regexMatch: { input: '$retailer', regex: term, options: 'i' } },
+        ]);
 
         pipeline.push({
           $addFields: {
             _isBoosted: {
               $and: [
-                { $eq: ["$boosted", true] },
-                { $or: [{ $eq: ["$boostExpiry", null] }, { $gt: ["$boostExpiry", "$$NOW"] }] },
+                { $eq: ['$boosted', true] },
+                { $or: [{ $eq: ['$boostExpiry', null] }, { $gt: ['$boostExpiry', '$$NOW'] }] },
               ],
             },
             _isKeywordRelevant: { $or: keywordRelevantOrConditions },
             _hasActivePromo: {
-              $and: [{ $ne: ["$promoExpiry", null] }, { $gt: ["$promoExpiry", "$$NOW"] }],
+              $and: [{ $ne: ['$promoExpiry', null] }, { $gt: ['$promoExpiry', '$$NOW'] }],
             },
           },
-        })
+        });
       } else {
         pipeline.push({
           $addFields: {
             _isBoosted: {
               $and: [
-                { $eq: ["$boosted", true] },
-                { $or: [{ $eq: ["$boostExpiry", null] }, { $gt: ["$boostExpiry", "$$NOW"] }] },
+                { $eq: ['$boosted', true] },
+                { $or: [{ $eq: ['$boostExpiry', null] }, { $gt: ['$boostExpiry', '$$NOW'] }] },
               ],
             },
             _isKeywordRelevant: false,
             _hasActivePromo: {
-              $and: [{ $ne: ["$promoExpiry", null] }, { $gt: ["$promoExpiry", "$$NOW"] }],
+              $and: [{ $ne: ['$promoExpiry', null] }, { $gt: ['$promoExpiry', '$$NOW'] }],
             },
           },
-        })
+        });
       }
 
       pipeline.push({
@@ -358,109 +358,103 @@ module.exports = ({
           _isBoosted: -1,
           _hasActivePromo: -1,
         },
-      })
-      pipeline.push({ $limit: 100 })
+      });
+      pipeline.push({ $limit: 100 });
       let results = await ragSystemStorage
         .aggregate(pipeline, {
           allowDiskUse: true,
           maxTimeMS: 30000,
         })
-        .toArray()
-      const removedTools = []
+        .toArray();
+      const removedTools = [];
       if (userID) {
         const shedTools = await shedToolsStorage
-          .find({ user_id: userID, collection: { $ne: "shed_analytics" } })
-          .toArray()
-        const shedToolNames = new Set(shedTools.map((t) => t.tool_name?.toLowerCase()))
-        const filteredResults = []
+          .find({ user_id: userID, collection: { $ne: 'shed_analytics' } })
+          .toArray();
+        const shedToolNames = new Set(shedTools.map((t) => t.tool_name?.toLowerCase()));
+        const filteredResults = [];
         for (const tool of results) {
-          const words = tool.product_name.split(" ").map((w) => w.toLowerCase())
-          const firstWord = words[1] || ""
-          const secondWord = words[2] || ""
+          const words = tool.product_name.split(' ').map((w) => w.toLowerCase());
+          const firstWord = words[1] || '';
+          const secondWord = words[2] || '';
           if (shedToolNames.has(firstWord) || shedToolNames.has(secondWord)) {
-            removedTools.push(tool.product_name)
+            removedTools.push(tool.product_name);
           } else {
-            filteredResults.push(tool)
+            filteredResults.push(tool);
           }
         }
-        results = filteredResults
+        results = filteredResults;
       }
-      let finalTools = []
+      let finalTools = [];
       if (results.length > 0) {
-        const grouped = {}
+        const grouped = {};
         results.forEach((tool) => {
-          const key = tool.retailer || "general"
-          if (!grouped[key]) grouped[key] = []
-          grouped[key].push(tool)
-        })
+          const key = tool.retailer || 'general';
+          if (!grouped[key]) grouped[key] = [];
+          grouped[key].push(tool);
+        });
         Object.values(grouped).forEach((group) => {
           if (group.length > 0 && finalTools.length < 5) {
-            finalTools.push(group[0])
+            finalTools.push(group[0]);
           }
-        })
+        });
         if (finalTools.length < 5) {
-          const remainingTools = []
+          const remainingTools = [];
           Object.values(grouped).forEach((group) => {
             for (let i = 1; i < group.length; i++) {
-              remainingTools.push(group[i])
+              remainingTools.push(group[i]);
             }
-          })
-          const needed = 5 - finalTools.length
-          finalTools = finalTools.concat(remainingTools.slice(0, needed))
+          });
+          const needed = 5 - finalTools.length;
+          finalTools = finalTools.concat(remainingTools.slice(0, needed));
         }
-        finalTools = finalTools.slice(0, 5)
+        finalTools = finalTools.slice(0, 5);
       }
-      let storeLocations = []
+      let storeLocations = [];
       if (finalTools.length > 0) {
-        if (
-          userLat &&
-          userLon &&
-          !isNaN(userLat) &&
-          !isNaN(userLon) &&
-          Math.abs(userLat) <= 90 &&
-          Math.abs(userLon) <= 180
-        ) {
-          const pipeline = [
-            {
-              $addFields: {
-                distance: {
-                  $multiply: [
-                    6371,
-                    {
-                      $acos: {
-                        $add: [
-                          {
-                            $multiply: [
-                              { $sin: { $multiply: [{ $degreesToRadians: userLat }, 1] } },
-                              { $sin: { $multiply: [{ $degreesToRadians: "$lat" }, 1] } },
-                            ],
-                          },
-                          {
-                            $multiply: [
-                              { $cos: { $multiply: [{ $degreesToRadians: userLat }, 1] } },
-                              { $cos: { $multiply: [{ $degreesToRadians: "$lat" }, 1] } },
-                              { $cos: { $multiply: [{ $degreesToRadians: { $subtract: ["$lon", userLon] } }, 1] } },
-                            ],
-                          },
-                        ],
-                      },
-                    },
-                  ],
-                },
-              },
-            },
-            { $sort: { distance: 1 } },
-            { $limit: 3 },
-          ]
-
-          storeLocations = await storeLocationStorage.aggregate(pipeline).toArray()
-        } else {
-          storeLocations = await storeLocationStorage.find().limit(3).toArray()
+        const retailers = [...new Set(finalTools.map((tool) => tool.retailer).filter(Boolean))];
+        if (retailers.length > 0) {
+          const storeQuery = { retailer: { $in: retailers } };
+          const allStores = await storeLocationStorage.find(storeQuery).toArray();
+          if (userLat && userLon) {
+            const userLatNum = Number.parseFloat(userLat);
+            const userLonNum = Number.parseFloat(userLon);
+            const storesWithDistance = allStores
+              .map((store) => {
+                const distance = calculateDistance(userLatNum, userLonNum, store.lat, store.lon);
+                return { ...store, distance };
+              })
+              .sort((a, b) => a.distance - b.distance);
+            const storesByRetailer = {};
+            storesWithDistance.forEach((store) => {
+              if (!storesByRetailer[store.retailer] || store.distance < storesByRetailer[store.retailer].distance) {
+                storesByRetailer[store.retailer] = store;
+              }
+            });
+            storeLocations = Object.values(storesByRetailer);
+          } else {
+            const storesByRetailer = {};
+            allStores.forEach((store) => {
+              if (!storesByRetailer[store.retailer]) {
+                storesByRetailer[store.retailer] = store;
+              }
+            });
+            storeLocations = Object.values(storesByRetailer);
+          }
         }
       }
-
+      function calculateDistance(lat1, lon1, lat2, lon2) {
+        const R = 6371;
+        const dLat = ((lat2 - lat1) * Math.PI) / 180;
+        const dLon = ((lon2 - lon1) * Math.PI) / 180;
+        const a =
+          Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+          Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        return R * c;
+      }
       await toolAnalyticsStorage.insertOne({
-        type: "filtered_search",
+        type: 'filtered_search',
         timestamp: new Date(),
         filters: { risk_level },
         searchTerms,
@@ -469,7 +463,7 @@ module.exports = ({
         resultCount: finalTools.length,
         removedToolsCount: removedTools.length,
         storeLocationsCount: storeLocations.length,
-      })
+      });
       res.json({
         finalTools,
         removedTools,
@@ -481,55 +475,55 @@ module.exports = ({
           storeLocationsFound: storeLocations.length,
           goodBetterBest: finalTools.length > 1,
         },
-      })
+      });
     } catch (error) {
-      console.error("Error in filtered-tools:", error)
-      res.status(500).json({ error: "Failed to fetch filtered tools" })
+      console.error('Error in filtered-tools:', error);
+      res.status(500).json({ error: 'Failed to fetch filtered tools' });
     }
-  })
+  });
 
-  router.get("/admin/rag-system/analytics", async (req, res) => {
+  router.get('/admin/rag-system/analytics', async (req, res) => {
     try {
-      const { startDate, endDate, type } = req.query
-      const matchQuery = {}
+      const { startDate, endDate, type } = req.query;
+      const matchQuery = {};
       if (startDate && endDate) {
         matchQuery.timestamp = {
           $gte: new Date(startDate),
           $lte: new Date(endDate),
-        }
+        };
       }
       if (type) {
-        matchQuery.type = type
+        matchQuery.type = type;
       }
-      const analytics = await toolAnalyticsStorage.find(matchQuery).sort({ timestamp: -1 }).limit(1000).toArray()
-      res.json(analytics)
+      const analytics = await toolAnalyticsStorage.find(matchQuery).sort({ timestamp: -1 }).limit(1000).toArray();
+      res.json(analytics);
     } catch (error) {
-      console.error("Error fetching analytics:", error)
-      res.status(500).json({ error: "Failed to fetch analytics" })
+      console.error('Error fetching analytics:', error);
+      res.status(500).json({ error: 'Failed to fetch analytics' });
     }
-  })
-  router.post("/admin/dev-test-override", async (req, res) => {
+  });
+  router.post('/admin/dev-test-override', async (req, res) => {
     try {
-      const { overrideKey, description, durationHours, updatedBy } = req.body
-      const userInfo = getUserInfoFromRequest(req)
-      const expiresAt = new Date()
-      expiresAt.setHours(expiresAt.getHours() + (durationHours || 24))
+      const { overrideKey, description, durationHours, updatedBy } = req.body;
+      const userInfo = getUserInfoFromRequest(req);
+      const expiresAt = new Date();
+      expiresAt.setHours(expiresAt.getHours() + (durationHours || 24));
       const override = {
         overrideKey,
         description,
         active: true,
         createdAt: new Date(),
         expiresAt,
-        createdBy: updatedBy || "admin",
-      }
-      await devTestOverrideStorage.insertOne(override)
+        createdBy: updatedBy || 'admin',
+      };
+      await devTestOverrideStorage.insertOne(override);
       await auditLogger.logAudit({
-        action: "CREATE",
-        resource: "dev_test_override",
+        action: 'CREATE',
+        resource: 'dev_test_override',
         resourceId: overrideKey,
-        userId: updatedBy || "admin",
-        userEmail: "admin@toolmate.com",
-        role: "admin",
+        userId: updatedBy || 'admin',
+        userEmail: 'admin@toolmate.com',
+        role: 'admin',
         newData: override,
         metadata: {
           overrideKey,
@@ -537,13 +531,13 @@ module.exports = ({
           adminAction: true,
         },
         ...userInfo,
-      })
-      res.json({ success: true, message: "Dev/test override created", override })
+      });
+      res.json({ success: true, message: 'Dev/test override created', override });
     } catch (error) {
-      console.error("Error creating dev/test override:", error)
-      res.status(500).json({ error: "Failed to create dev/test override" })
+      console.error('Error creating dev/test override:', error);
+      res.status(500).json({ error: 'Failed to create dev/test override' });
     }
-  })
+  });
 
-  return router
-}
+  return router;
+};

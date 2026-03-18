@@ -13,6 +13,8 @@ const PORT = process.env.PORT || 5000;
 const { Server } = require('socket.io');
 const http = require('http');
 const server = http.createServer(app);
+const dns = require('dns');
+dns.setServers(['8.8.8.8', '8.8.4.4']);
 const io = new Server(server, {
   cors: {
     origin: '*',
@@ -36,9 +38,45 @@ const jobLogsRoutes = require('./services/job-logs-routes');
 const blogRoutes = require('./services/blogs-route');
 const subscriptionRoutes = require('./services/subscription-routes');
 const storeLocationRoutes = require('./services/store-location');
-const testimonialsRoute = require('./services/testimonials');
+const { reconcileSubscriptionState } = require('./services/subscription-reconciliation');
+
+const validateStripeEnv = () => {
+  const missing = [];
+
+  if (!process.env.STRIPE_SECRET_KEY) {
+    missing.push('STRIPE_SECRET_KEY');
+  }
+
+  if (!process.env.STRIPE_WEBHOOK_SECRET) {
+    missing.push('STRIPE_WEBHOOK_SECRET');
+  }
+
+  if (!process.env.STRIPE_PRICE_ID_BEST_MATES_ONE_TIME) {
+    missing.push('STRIPE_PRICE_ID_BEST_MATES_ONE_TIME');
+  }
+
+  if (!(process.env.STRIPE_PRICE_ID_BEST_MATES_RECURRING || process.env.STRIPE_PRICE_ID_BEST_MATES)) {
+    missing.push('STRIPE_PRICE_ID_BEST_MATES_RECURRING (or STRIPE_PRICE_ID_BEST_MATES)');
+  }
+
+  if (missing.length > 0) {
+    throw new Error(`Missing required Stripe environment variables: ${missing.join(', ')}`);
+  }
+};
+
+const SUBSCRIPTION_RECONCILIATION_CRON = process.env.SUBSCRIPTION_RECONCILIATION_CRON || '0 * * * *';
+
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));
+app.use(
+  express.json({
+    limit: '50mb',
+    verify: (req, res, buf) => {
+      if (req.originalUrl === '/api/webhooks/stripe') {
+        req.rawBody = buf;
+      }
+    },
+  }),
+);
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.pcjdk.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
@@ -67,7 +105,6 @@ let subscriptionStorage;
 let adminCredentialsStorage;
 let toolAnalyticsStorage;
 let promoStorage;
-let testimonialsStorage;
 let devTestOverrideStorage;
 let emailService;
 let emailTriggers;
@@ -75,6 +112,8 @@ let auditLogger;
 let clerkClient;
 async function run() {
   try {
+    validateStripeEnv();
+
     await client.connect();
     await client.db('admin').command({ ping: 1 });
     console.log('✅ Connected to MongoDB!');
@@ -92,7 +131,6 @@ async function run() {
     auditLogsStorage = client.db('Toolmate').collection('AuditLogs');
     jobLogsStorage = client.db('Toolmate').collection('JobLogs');
     blogsStorage = client.db('Toolmate').collection('Blogs');
-    testimonialsStorage = client.db('Toolmate').collection('Reviews');
     adminCredentialsStorage = client.db('Toolmate').collection('AdminCredentials');
     subscriptionStorage = client.db('Toolmate').collection('Subscriptions');
     toolAnalyticsStorage = client.db('Toolmate').collection('ToolAnalytics');
@@ -110,14 +148,14 @@ async function run() {
       };
     }
     io.on('connection', (socket) => {
-      console.log('✅ Admin connected for real-time monitoring:', socket.id);
+      console.log('Admin connected for real-time monitoring:', socket.id);
       socket.on('join-monitoring', (data) => {
-        console.log('📡 Client joined monitoring room:', socket.id);
+        console.log('Client joined monitoring room:', socket.id);
         socket.join('admin-monitoring');
       });
 
       socket.on('join-boost-monitoring', (data) => {
-        console.log('⏱️ Client joined boost monitoring:', socket.id);
+        console.log('⏱Client joined boost monitoring:', socket.id);
         socket.join('boost-monitoring');
       });
 
@@ -131,7 +169,7 @@ async function run() {
           let userDetails = null;
           const recentSession = await chatLogsStorage.findOne(
             { sessionId: data.sessionId },
-            { sort: { timestamp: -1 } }
+            { sort: { timestamp: -1 } },
           );
           if (recentSession) {
             userDetails = {
@@ -176,7 +214,7 @@ async function run() {
           console.log(
             `📤 Admin ${socket.id} injected message to session ${data.sessionId} for user ${
               userDetails?.userName || 'Unknown'
-            }`
+            }`,
           );
         } catch (error) {
           console.error('Error injecting message:', error);
@@ -199,7 +237,7 @@ async function run() {
             timestamp: new Date(),
             updateType: data.updateType,
           });
-          console.log(`🔄 Product ${data.toolId} reindexed instantly`);
+          console.log(`Product ${data.toolId} reindexed instantly`);
         } catch (error) {
           console.error('Error handling product update:', error);
         }
@@ -207,7 +245,7 @@ async function run() {
 
       socket.on('boost-timer-expired', async (data) => {
         try {
-          console.log(`⏰ Boost timer expired for tool: ${data.toolName} (${data.toolId})`);
+          console.log(`Boost timer expired for tool: ${data.toolName} (${data.toolId})`);
           await ragSystemStorage.updateOne(
             { id: data.toolId },
             {
@@ -217,14 +255,14 @@ async function run() {
                 updatedAt: new Date(),
                 updatedBy: 'system-timer-expired',
               },
-            }
+            },
           );
 
           io.to('admin-monitoring').emit('boost-timer-expired-notification', {
             toolId: data.toolId,
             toolName: data.toolName,
             timestamp: new Date(),
-            message: `⏰ TIME UP! Boost expired for "${data.toolName}"`,
+            message: `TIME UP! Boost expired for "${data.toolName}"`,
             type: 'timer-expired',
           });
 
@@ -253,7 +291,7 @@ async function run() {
         }
       });
       socket.on('disconnect', (reason) => {
-        console.log('❌ Admin disconnected from monitoring:', socket.id, 'Reason:', reason);
+        console.log('Admin disconnected from monitoring:', socket.id, 'Reason:', reason);
       });
     });
     cron.schedule('*/1 * * * *', async () => {
@@ -277,7 +315,7 @@ async function run() {
                 lastLimitReset: todayDateString,
                 updatedAt: now,
               },
-            }
+            },
           );
           for (const user of usersNeedingReset) {
             await auditLogger.logAudit({
@@ -313,10 +351,26 @@ async function run() {
             count: usersNeedingReset.length,
           });
 
-          console.log(`🔄 Reset daily limits for ${usersNeedingReset.length} users at ${now.toISOString()}`);
+          console.log(`Reset daily limits for ${usersNeedingReset.length} users at ${now.toISOString()}`);
         }
       } catch (error) {
         console.error('Error in daily limit reset cron job:', error);
+      }
+    });
+
+    cron.schedule(SUBSCRIPTION_RECONCILIATION_CRON, async () => {
+      try {
+        const summary = await reconcileSubscriptionState({
+          usersStorage,
+          subscriptionStorage,
+          auditLogger,
+        });
+
+        console.log(
+          `Subscription reconciliation complete. scanned=${summary.scanned}, changed=${summary.changed}, failed=${summary.failed}`,
+        );
+      } catch (error) {
+        console.error('Error in subscription reconciliation cron job:', error);
       }
     });
     cron.schedule('*/1 * * * *', async () => {
@@ -338,7 +392,7 @@ async function run() {
                 updatedAt: now,
                 updatedBy: 'system-cron',
               },
-            }
+            },
           );
           for (const tool of expiredBoosts) {
             await auditLogger.logAudit({
@@ -368,7 +422,7 @@ async function run() {
             message: `${expiredBoosts.length} tool boost(s) have expired`,
           });
 
-          console.log(`🕒 Expired ${expiredBoosts.length} tool boosts`);
+          console.log(`Expired ${expiredBoosts.length} tool boosts`);
         }
       } catch (error) {
         console.error('Error in boost expiry cron job:', error);
@@ -403,14 +457,14 @@ async function run() {
           },
         });
         io.to('admin-monitoring').emit('new-live-message', payload);
-        console.log('📢 Emitted new-live-message to admin-monitoring room:', payload.sessionId);
+        console.log('Emitted new-live-message to admin-monitoring room:', payload.sessionId);
       } catch (error) {
         console.error('Error emitting new live message:', error);
       }
     }
     function notifyActiveSessionsChanged() {
       io.to('admin-monitoring').emit('active-sessions-changed');
-      console.log('🔄 Emitted active-sessions-changed to admin-monitoring room');
+      console.log('Emitted active-sessions-changed to admin-monitoring room');
     }
     const routeDependencies = {
       feedbackStorage,
@@ -427,7 +481,6 @@ async function run() {
       auditLogsStorage,
       jobLogsStorage,
       adminCredentialsStorage,
-      testimonialsStorage,
       emailService,
       emailTriggers,
       auditLogger,
@@ -464,7 +517,6 @@ async function run() {
     app.use('/', subscriptionRoutes(routeDependencies));
     app.use('/', blogRoutes(routeDependencies));
     app.use('/', storeLocationRoutes(routeDependencies));
-    app.use('/', testimonialsRoute(routeDependencies));
     app.use((req, res) => {
       res.status(404).send({ error: 'Not Found' });
     });
@@ -473,12 +525,13 @@ async function run() {
       res.status(500).send({ error: 'Something went wrong!' });
     });
     server.listen(PORT, () => {
-      console.log(`🚀 Server is running on port ${PORT}`);
-      console.log(`🔌 Socket.io server is ready`);
-      console.log(`⏰ Boost expiry cron job scheduled`);
+      console.log(`Server is running on port ${PORT}`);
+      console.log(`Socket.io server is ready`);
+      console.log(`Boost expiry cron job scheduled`);
+      console.log(`Subscription reconciliation cron scheduled: ${SUBSCRIPTION_RECONCILIATION_CRON}`);
     });
   } catch (err) {
-    console.error('❌ MongoDB connection error:', err);
+    console.error('MongoDB connection error:', err);
     process.exit(1);
   }
 }

@@ -12,33 +12,32 @@ module.exports = ({
   router.post('/add-feedback', async (req, res) => {
     try {
       const data = req.body;
-      if (!data.messageId || data.messageId === '') {
-        console.log('[v0] Missing or empty messageId');
-        return res.status(400).send({
-          error: 'Missing required field: messageId',
-          received: data,
-        });
-      }
       const userInfo = getUserInfoFromRequest(req);
-      const feedbackData = {
+      const existingFeedbackQuery = {
+        messageId: data.messageId,
+        email: Array.isArray(data.email) ? { $in: data.email } : data.email,
+        reportStatus: data.reportStatus,
+      };
+      const existingFeedback = await feedbackStorage.findOne(existingFeedbackQuery);
+      if (existingFeedback) {
+        return res.status(200).send({ message: 'Report is already added!' });
+      }
+      // Insert new feedback
+      const feedbackInsertResult = await feedbackStorage.insertOne({
         ...data,
         createdAt: new Date(),
         updatedAt: new Date(),
         flagTriggered: Boolean(data.reportStatus && data.feedback?.reasons),
-      };
-      console.log('[v0] Inserting feedback:', feedbackData);
-      const feedbackInsertResult = await feedbackStorage.insertOne(feedbackData);
-      console.log('[v0] Feedback inserted with ID:', feedbackInsertResult.insertedId);
-      const userEmail =
-        data.isLoggedInUser && data.email ? (Array.isArray(data.email) ? data.email[0] : data.email) : 'Anonymous';
-      // Prepare audit lg data
+      });
+      // Prepare audit log data
+      const userEmail = Array.isArray(data.email) ? data.email[0] : data.email;
       const auditData = {
         action: 'CREATE',
         resource: 'feedback',
         resourceId: feedbackInsertResult.insertedId.toString(),
         userId: userEmail,
         userEmail: userEmail,
-        role: data.isLoggedInUser ? 'user' : 'Anonymous',
+        role: data.isLoggedInUser ? 'user' : 'anonymous',
         newData: {
           messageId: data.messageId,
           reportStatus: data.reportStatus,
@@ -46,20 +45,16 @@ module.exports = ({
         },
         ...userInfo,
       };
-
       await auditLogger.logAudit(auditData);
-
       if (data.reportStatus && data.feedback?.reasons) {
-        console.log('[v0] Creating flagged message for messageId:', data.messageId);
-
         const flaggedMessage = {
           messageId: data.messageId,
           messageText: data.messageText,
           messageTimestamp: new Date(data.messageTimestamp),
           reasons: data.feedback.reasons,
           otherReason: data.feedback.otherReason || '',
-          userEmail: userEmail,
-          isLoggedInUser: Boolean(data.isLoggedInUser),
+          userEmail: data.email,
+          isLoggedInUser: data.isLoggedInUser,
           status: 'pending',
           adminComments: '',
           flaggedAt: new Date(),
@@ -68,25 +63,19 @@ module.exports = ({
           softDeleted: false,
           archived: false,
         };
-
-        console.log('[v0] Flagged message data:', flaggedMessage);
         const flaggedResult = await flaggedMessagesStorage.insertOne(flaggedMessage);
-        console.log('[v0] Flagged message created with ID:', flaggedResult.insertedId);
-
-        const chatLogUpdateQuery = {
-          mateyResponse: data.messageText,
-          userEmail: Array.isArray(data.email) ? { $in: data.email } : userEmail,
-        };
-        console.log('[v0] Updating chat logs with query:', chatLogUpdateQuery);
-
-        const chatLogUpdateResult = await chatLogsStorage.updateMany(chatLogUpdateQuery, {
-          $set: {
-            flagTriggered: true,
-            updatedAt: new Date(),
+        await chatLogsStorage.updateMany(
+          {
+            mateyResponse: data.messageText,
+            userEmail: Array.isArray(data.email) ? { $in: data.email } : data.email,
           },
-        });
-        console.log('[v0] Chat logs update result:', chatLogUpdateResult);
-
+          {
+            $set: {
+              flagTriggered: true,
+              updatedAt: new Date(),
+            },
+          }
+        );
         // Log audit for flagged message
         await auditLogger.logAudit({
           ...auditData,
@@ -98,78 +87,12 @@ module.exports = ({
             status: 'pending',
           },
         });
-      } else {
-        console.log(
-          '[v0] No flagged message created - reportStatus:',
-          data.reportStatus,
-          'reasons:',
-          data.feedback?.reasons
-        );
       }
-
-      console.log('[v0] Feedback process completed successfully');
       res.status(200).send(feedbackInsertResult);
     } catch (err) {
-      console.error('[v0] Error adding feedback:', err);
+      console.error('Error adding feedback:', err);
       res.status(500).send({
         error: 'Failed to store feedback',
-        details: err.message,
-      });
-    }
-  });
-
-  router.get('/get-feedback', async (req, res) => {
-    try {
-      const { page = 1, limit = 20, search = '' } = req.query;
-      const query = {
-        reportStatus: false,
-        feedback: { $in: ['helpful', 'unhelpful'] },
-      };
-      if (search && search.trim()) {
-        query.$and = [
-          {
-            $or: [
-              { messageText: { $regex: search.trim(), $options: 'i' } },
-              { email: { $regex: search.trim(), $options: 'i' } },
-              { name: { $regex: search.trim(), $options: 'i' } },
-            ],
-          },
-        ];
-      }
-      const skip = (parseInt(page) - 1) * parseInt(limit);
-      const feedbackData = await feedbackStorage
-        .find(query, {
-          projection: {
-            _id: 1,
-            messageId: 1,
-            messageText: 1,
-            messageTimestamp: 1,
-            feedback: 1,
-            isLoggedInUser: 1,
-            name: 1,
-            email: 1,
-            reportStatus: 1,
-          },
-        })
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(parseInt(limit))
-        .toArray();
-      const totalCount = await feedbackStorage.countDocuments(query);
-      const totalPages = Math.ceil(totalCount / parseInt(limit));
-      res.status(200).send({
-        feedback: feedbackData,
-        pagination: {
-          current: parseInt(page),
-          total: totalPages,
-          count: totalCount,
-          limit: parseInt(limit),
-        },
-      });
-    } catch (err) {
-      console.error('Error fetching feedback:', err);
-      res.status(500).send({
-        error: 'Failed to fetch feedback',
         details: err.message,
       });
     }
