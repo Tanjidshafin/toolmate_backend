@@ -58,6 +58,120 @@ module.exports = ({
     return Number.isNaN(parsed.getTime()) ? new Date(0) : parsed;
   };
 
+  const toSignature = (message = {}) => {
+    const timestamp = getEffectiveMessageTimestamp(message).toISOString();
+    return [
+      message?.id || '',
+      message?.sender || '',
+      message?.text || '',
+      timestamp,
+      message?.streamId || '',
+      message?.responseGroupId || '',
+      Number.isFinite(message?.partIndex) ? message.partIndex : '',
+    ].join('|');
+  };
+
+  const normalizeMessage = (message = {}, sessionId = '') => {
+    return {
+      ...message,
+      id: message?.id || `${sessionId || 'session'}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      sender: message?.sender || 'matey',
+      text: typeof message?.text === 'string' ? message.text : '',
+      timestamp: message?.timestamp || message?.createdAt || new Date(),
+    };
+  };
+
+  const sortMessagesAscending = (messages = []) => {
+    return messages.slice().sort((a, b) => {
+      return getEffectiveMessageTimestamp(a) - getEffectiveMessageTimestamp(b);
+    });
+  };
+
+  const mergeMessages = (existingMessages = [], incomingMessages = [], sessionId = '') => {
+    const merged = [];
+    const seenIds = new Set();
+    const seenSignatures = new Set();
+
+    [...existingMessages, ...incomingMessages].forEach((rawMessage) => {
+      const message = normalizeMessage(rawMessage, sessionId);
+      const signature = toSignature(message);
+
+      if (message.id && seenIds.has(message.id)) {
+        return;
+      }
+
+      if (seenSignatures.has(signature)) {
+        return;
+      }
+
+      if (message.id) {
+        seenIds.add(message.id);
+      }
+      seenSignatures.add(signature);
+      merged.push(message);
+    });
+
+    return sortMessagesAscending(merged);
+  };
+
+  const getLatestConversationPair = (messages = [], fallbackPrompt = '', fallbackResponse = '') => {
+    const sortedMessages = sortMessagesAscending(messages);
+    if (sortedMessages.length === 0) {
+      return {
+        latestPrompt: fallbackPrompt || '',
+        latestMateyResponse: fallbackResponse || '',
+        latestMateyParts: [],
+      };
+    }
+
+    let latestUserIndex = -1;
+    for (let i = sortedMessages.length - 1; i >= 0; i -= 1) {
+      if (sortedMessages[i]?.sender === 'user') {
+        latestUserIndex = i;
+        break;
+      }
+    }
+
+    const latestPrompt =
+      latestUserIndex >= 0 ? sortedMessages[latestUserIndex]?.text || fallbackPrompt || '' : fallbackPrompt || '';
+
+    const responseWindow =
+      latestUserIndex >= 0
+        ? sortedMessages.slice(latestUserIndex + 1).filter((message) => message?.sender === 'matey')
+        : sortedMessages.filter((message) => message?.sender === 'matey');
+
+    if (responseWindow.length === 0) {
+      return {
+        latestPrompt,
+        latestMateyResponse: fallbackResponse || '',
+        latestMateyParts: [],
+      };
+    }
+
+    const latestMateyMessage = responseWindow[responseWindow.length - 1];
+    const latestGroupId = latestMateyMessage?.responseGroupId;
+    const groupedParts = latestGroupId
+      ? responseWindow.filter((message) => message?.responseGroupId === latestGroupId)
+      : responseWindow;
+
+    const orderedParts = groupedParts.slice().sort((a, b) => {
+      const partA = Number.isFinite(a?.partIndex) ? a.partIndex : Number.MAX_SAFE_INTEGER;
+      const partB = Number.isFinite(b?.partIndex) ? b.partIndex : Number.MAX_SAFE_INTEGER;
+      if (partA !== partB) {
+        return partA - partB;
+      }
+      return getEffectiveMessageTimestamp(a) - getEffectiveMessageTimestamp(b);
+    });
+
+    const latestMateyResponse = orderedParts.map((part) => part?.text || '').join('\n\n').trim() || fallbackResponse || '';
+
+    return {
+      latestPrompt,
+      latestMateyResponse,
+      latestMateyParts: orderedParts,
+    };
+  };
+
   router.post('/store-session', async (req, res) => {
     try {
       const {
@@ -74,26 +188,42 @@ module.exports = ({
 
       const userInfo = getUserInfoFromRequest(req);
       const timestamp = new Date();
+      const normalizedUserEmail = normalizeEmailValue(userEmail);
+
+      const incomingMessages = Array.isArray(messages)
+        ? messages.map((message) => normalizeMessage(message, sessionId))
+        : [];
+
+      const existingSession = await sessionsStorage.findOne({
+        sessionId,
+        $or: [{ userEmail: normalizedUserEmail }, { userEmail: { $in: [normalizedUserEmail] } }],
+      });
+
+      const mergedMessages = mergeMessages(existingSession?.messages || [], incomingMessages, sessionId);
+      const latestPair = getLatestConversationPair(mergedMessages, prompt, mateyResponse);
 
       const sessionData = {
         sessionId,
         userName,
         userEmail,
-        prompt,
-        mateyResponse,
+        prompt: latestPair.latestPrompt,
+        mateyResponse: latestPair.latestMateyResponse,
+        latestPrompt: latestPair.latestPrompt,
+        latestMateyResponse: latestPair.latestMateyResponse,
         suggestedTools,
         budgetTier,
         timestamp,
         flagTriggered,
-        messages,
+        messages: mergedMessages,
       };
 
       const logData = {
         sessionId,
         userEmail,
         userName,
-        prompt,
-        mateyResponse,
+        prompt: latestPair.latestPrompt,
+        mateyResponse: latestPair.latestMateyResponse,
+        mateyResponseParts: latestPair.latestMateyParts,
         suggestedTools,
         budgetTier,
         timestamp,
@@ -104,31 +234,15 @@ module.exports = ({
         },
       };
 
-      const getLatestMateyResponseParts = (allMessages = []) => {
-        if (!Array.isArray(allMessages) || allMessages.length === 0) {
-          return [];
-        }
-
-        let lastUserIndex = -1;
-        for (let i = allMessages.length - 1; i >= 0; i -= 1) {
-          if (allMessages[i]?.sender === 'user') {
-            lastUserIndex = i;
-            break;
-          }
-        }
-
-        const responseWindow = allMessages.slice(lastUserIndex + 1);
-        return responseWindow.filter((message) => message?.sender === 'matey' && typeof message?.text === 'string');
-      };
-
-      if (messages && messages.length > 0 && sessionId) {
-        const latestResponseParts = getLatestMateyResponseParts(messages);
+      if (latestPair.latestMateyParts.length > 0 && sessionId) {
+        const latestResponseParts = latestPair.latestMateyParts;
         const normalizedParts =
           latestResponseParts.length > 0
             ? latestResponseParts
-            : [{ id: `fallback-${Date.now()}`, text: mateyResponse || '' }];
+            : [{ id: `fallback-${Date.now()}`, text: latestPair.latestMateyResponse || '' }];
         const totalParts = normalizedParts.length;
-        const responseGroupId = `${sessionId}-${Date.now()}`;
+        const responseGroupId =
+          normalizedParts[normalizedParts.length - 1]?.responseGroupId || `${sessionId}-${Date.now()}`;
 
         normalizedParts.forEach((part, index) => {
           emitNewLiveMessage({
@@ -141,12 +255,11 @@ module.exports = ({
             userEmail,
             timestamp: part.timestamp || timestamp,
             messageText: part.text,
-            userPrompt: prompt,
+            userPrompt: latestPair.latestPrompt,
           });
         });
       }
-      const normalizedUserEmail = normalizeEmailValue(userEmail);
-      const [sessionUpsert, logInsert] = await Promise.all([
+      const [sessionUpsert, latestExistingLog] = await Promise.all([
         sessionsStorage.updateOne(
           {
             sessionId,
@@ -155,8 +268,24 @@ module.exports = ({
           { $set: sessionData },
           { upsert: true }
         ),
-        chatLogsStorage.insertOne(logData),
+        chatLogsStorage.findOne(
+          {
+            sessionId,
+            $or: [{ userEmail: normalizedUserEmail }, { userEmail: { $in: [normalizedUserEmail] } }],
+          },
+          { sort: { timestamp: -1 } }
+        ),
       ]);
+
+      let logInsert = { insertedId: null };
+      const isDuplicateLog =
+        latestExistingLog &&
+        latestExistingLog.prompt === logData.prompt &&
+        latestExistingLog.mateyResponse === logData.mateyResponse;
+
+      if (!isDuplicateLog && (logData.prompt || logData.mateyResponse)) {
+        logInsert = await chatLogsStorage.insertOne(logData);
+      }
 
       const sessionAuditId = sessionUpsert.upsertedId || `${sessionId}:${normalizedUserEmail || 'unknown'}`;
       await auditLogger.logAudit({
@@ -285,6 +414,7 @@ module.exports = ({
         userEmail: chatLog.userEmail,
         prompt: chatLog.prompt,
         mateyResponse: chatLog.mateyResponse,
+        mateyResponseParts: chatLog.mateyResponseParts || [],
         suggestedTools: chatLog.suggestedTools || [],
         timestamp: chatLog.timestamp,
         flagTriggered: chatLog.flagTriggered,
@@ -332,7 +462,6 @@ module.exports = ({
           },
         },
         { $replaceRoot: { newRoot: '$latestSession' } },
-        { $sort: { timestamp: -1 } },
         { $skip: skip },
         { $limit: Number.parseInt(limit) },
       ];
@@ -385,7 +514,7 @@ module.exports = ({
       });
 
       const [sessions, totalResult] = await Promise.all([
-        sessionsStorage.aggregate(pipeline).toArray(),
+        sessionsStorage.aggregate(pipeline, { allowDiskUse: true }).toArray(),
         sessionsStorage
           .aggregate([
             { $match: matchStage },

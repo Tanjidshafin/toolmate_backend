@@ -41,6 +41,7 @@ const jobLogsRoutes = require('./services/job-logs-routes');
 const blogRoutes = require('./services/blogs-route');
 const subscriptionRoutes = require('./services/subscription-routes');
 const storeLocationRoutes = require('./services/store-location');
+const testimonialsRoutes = require('./services/testimonials-routes');
 const { reconcileSubscriptionState } = require('./services/subscription-reconciliation');
 
 const validateStripeEnv = () => {
@@ -109,6 +110,7 @@ let adminCredentialsStorage;
 let toolAnalyticsStorage;
 let promoStorage;
 let devTestOverrideStorage;
+let testimonialsStorage;
 let emailService;
 let emailTriggers;
 let auditLogger;
@@ -140,6 +142,14 @@ async function run() {
     promoStorage = client.db('Toolmate').collection('Promos');
     devTestOverrideStorage = client.db('Toolmate').collection('DevTestOverrides');
     storeLocationStorage = client.db('Toolmate').collection('StoreLocations');
+    testimonialsStorage = client.db('Toolmate').collection('Testimonials');
+
+    await Promise.all([
+      sessionsStorage.createIndex({ timestamp: -1, sessionId: 1, userEmail: 1 }),
+      sessionsStorage.createIndex({ sessionId: 1, userEmail: 1 }),
+      testimonialsStorage.createIndex({ isVisible: 1, createdAt: -1 }),
+      testimonialsStorage.createIndex({ deletedAt: 1, createdAt: -1 }),
+    ]);
     emailService = new EmailService(emailLogsStorage);
     emailTriggers = new EmailTriggers(emailService);
     auditLogger = new AuditLogger(auditLogsStorage);
@@ -499,6 +509,7 @@ async function run() {
       toolAnalyticsStorage,
       promoStorage,
       devTestOverrideStorage,
+      testimonialsStorage,
       getUserInfoFromRequest,
       emitNewLiveMessage,
       blogsStorage,
@@ -526,6 +537,7 @@ async function run() {
     app.use('/', subscriptionRoutes(routeDependencies));
     app.use('/', blogRoutes(routeDependencies));
     app.use('/', storeLocationRoutes(routeDependencies));
+    app.use('/', testimonialsRoutes(routeDependencies));
     app.use((req, res) => {
       res.status(404).send({ error: 'Not Found' });
     });
