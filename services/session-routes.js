@@ -90,14 +90,46 @@ module.exports = ({
           ip: req.ip,
         },
       };
+
+      const getLatestMateyResponseParts = (allMessages = []) => {
+        if (!Array.isArray(allMessages) || allMessages.length === 0) {
+          return [];
+        }
+
+        let lastUserIndex = -1;
+        for (let i = allMessages.length - 1; i >= 0; i -= 1) {
+          if (allMessages[i]?.sender === 'user') {
+            lastUserIndex = i;
+            break;
+          }
+        }
+
+        const responseWindow = allMessages.slice(lastUserIndex + 1);
+        return responseWindow.filter((message) => message?.sender === 'matey' && typeof message?.text === 'string');
+      };
+
       if (messages && messages.length > 0 && sessionId) {
-        emitNewLiveMessage({
-          sessionId,
-          userName,
-          userEmail,
-          timestamp,
-          messageText: mateyResponse,
-          userPrompt: prompt,
+        const latestResponseParts = getLatestMateyResponseParts(messages);
+        const normalizedParts =
+          latestResponseParts.length > 0
+            ? latestResponseParts
+            : [{ id: `fallback-${Date.now()}`, text: mateyResponse || '' }];
+        const totalParts = normalizedParts.length;
+        const responseGroupId = `${sessionId}-${Date.now()}`;
+
+        normalizedParts.forEach((part, index) => {
+          emitNewLiveMessage({
+            messageId: part.id || `${responseGroupId}-${index}`,
+            responseGroupId,
+            partIndex: index,
+            totalParts,
+            sessionId,
+            userName,
+            userEmail,
+            timestamp: part.timestamp || timestamp,
+            messageText: part.text,
+            userPrompt: prompt,
+          });
         });
       }
       const [sessionInsert, logInsert] = await Promise.all([

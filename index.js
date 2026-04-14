@@ -12,6 +12,7 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 const { Server } = require('socket.io');
 const http = require('http');
+const { randomUUID } = require('crypto');
 const server = http.createServer(app);
 const dns = require('dns');
 dns.setServers(['8.8.8.8', '8.8.4.4']);
@@ -20,6 +21,8 @@ const io = new Server(server, {
     origin: '*',
     methods: ['GET', 'POST'],
   },
+  pingInterval: 30000,
+  pingTimeout: 5000,
 });
 const feedbackRoutes = require('./services/feedback-routes');
 const messageRoutes = require('./services/message-routes');
@@ -438,6 +441,9 @@ async function run() {
           }
         }
         const payload = {
+          id:
+            messageData.messageId ||
+            `${messageData.sessionId}-${Date.now()}-${typeof randomUUID === 'function' ? randomUUID() : Math.random().toString(36).slice(2, 10)}`,
           sessionId: messageData.sessionId,
           userName: messageData.userName || (userDetails ? userDetails.userName : 'Unknown User'),
           userEmail: messageData.userEmail || (userDetails ? userDetails.userEmail : 'N/A'),
@@ -445,6 +451,9 @@ async function run() {
           timestamp: messageData.timestamp || new Date(),
           messageText: messageData.messageText,
           prompt: messageData.userPrompt,
+          partIndex: messageData.partIndex,
+          totalParts: messageData.totalParts,
+          responseGroupId: messageData.responseGroupId,
         };
         await toolAnalyticsStorage.insertOne({
           type: 'message',
