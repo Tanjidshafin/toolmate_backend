@@ -45,6 +45,19 @@ module.exports = ({
 
   const chatCache = new LRUCache(100);
 
+  const normalizeEmailValue = (email) => {
+    if (Array.isArray(email)) {
+      return email[0] || null;
+    }
+    return email || null;
+  };
+
+  const getEffectiveMessageTimestamp = (message) => {
+    const raw = message?.timestamp || message?.createdAt;
+    const parsed = raw ? new Date(raw) : new Date(0);
+    return Number.isNaN(parsed.getTime()) ? new Date(0) : parsed;
+  };
+
   router.post('/store-session', async (req, res) => {
     try {
       const {
@@ -132,14 +145,24 @@ module.exports = ({
           });
         });
       }
-      const [sessionInsert, logInsert] = await Promise.all([
-        sessionsStorage.insertOne(sessionData),
+      const normalizedUserEmail = normalizeEmailValue(userEmail);
+      const [sessionUpsert, logInsert] = await Promise.all([
+        sessionsStorage.updateOne(
+          {
+            sessionId,
+            $or: [{ userEmail: normalizedUserEmail }, { userEmail: { $in: [normalizedUserEmail] } }],
+          },
+          { $set: sessionData },
+          { upsert: true }
+        ),
         chatLogsStorage.insertOne(logData),
       ]);
+
+      const sessionAuditId = sessionUpsert.upsertedId || `${sessionId}:${normalizedUserEmail || 'unknown'}`;
       await auditLogger.logAudit({
         action: 'CREATE',
         resource: 'session',
-        resourceId: sessionInsert.insertedId.toString(),
+        resourceId: sessionAuditId.toString(),
         userId: userEmail,
         userEmail: userEmail,
         role: 'user',
@@ -156,7 +179,7 @@ module.exports = ({
       notifyActiveSessionsChanged();
       res.json({
         success: true,
-        sessionId: sessionInsert.insertedId,
+        sessionId: sessionAuditId,
         logId: logInsert.insertedId,
       });
     } catch (error) {
@@ -287,6 +310,28 @@ module.exports = ({
 
       const pipeline = [
         { $match: matchStage },
+        {
+          $addFields: {
+            normalizedEmail: {
+              $cond: {
+                if: { $isArray: '$userEmail' },
+                then: { $arrayElemAt: ['$userEmail', 0] },
+                else: '$userEmail',
+              },
+            },
+          },
+        },
+        { $sort: { timestamp: -1 } },
+        {
+          $group: {
+            _id: {
+              email: '$normalizedEmail',
+              sessionId: '$sessionId',
+            },
+            latestSession: { $first: '$$ROOT' },
+          },
+        },
+        { $replaceRoot: { newRoot: '$latestSession' } },
         { $sort: { timestamp: -1 } },
         { $skip: skip },
         { $limit: Number.parseInt(limit) },
@@ -341,7 +386,31 @@ module.exports = ({
 
       const [sessions, totalResult] = await Promise.all([
         sessionsStorage.aggregate(pipeline).toArray(),
-        sessionsStorage.aggregate([{ $match: matchStage }, { $count: 'total' }]).toArray(),
+        sessionsStorage
+          .aggregate([
+            { $match: matchStage },
+            {
+              $addFields: {
+                normalizedEmail: {
+                  $cond: {
+                    if: { $isArray: '$userEmail' },
+                    then: { $arrayElemAt: ['$userEmail', 0] },
+                    else: '$userEmail',
+                  },
+                },
+              },
+            },
+            {
+              $group: {
+                _id: {
+                  email: '$normalizedEmail',
+                  sessionId: '$sessionId',
+                },
+              },
+            },
+            { $count: 'total' },
+          ])
+          .toArray(),
       ]);
       const total = totalResult[0]?.total || 0;
       res.json({
@@ -380,8 +449,12 @@ module.exports = ({
         return res.status(404).json({ error: 'Session not found' });
       }
 
+      const sortedMessages = (session.messages || []).slice().sort((a, b) => {
+        return getEffectiveMessageTimestamp(a) - getEffectiveMessageTimestamp(b);
+      });
+
       res.json({
-        messages: session.messages || [],
+        messages: sortedMessages,
         suggestedTools: session.suggestedTools || [],
         mateyResponse: session.mateyResponse || '',
         fullPrompt: session.prompt || '',
@@ -445,9 +518,7 @@ module.exports = ({
             $group: {
               _id: {
                 email: '$email',
-                userName: '$userName',
-                userAgent: '$userAgent',
-                ip: '$ip',
+                sessionId: '$sessionId',
               },
               latestSession: { $first: '$$ROOT' },
             },
