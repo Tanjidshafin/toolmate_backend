@@ -36,11 +36,7 @@ const isSubscriptionEntitled = (subscription, now = new Date()) => {
   return false;
 };
 
-const getBillingPriceId = (billingMode) => {
-  if (billingMode === 'one_time') {
-    return process.env.STRIPE_PRICE_ID_BEST_MATES_ONE_TIME || null;
-  }
-
+const getBillingPriceId = () => {
   return process.env.STRIPE_PRICE_ID_BEST_MATES_RECURRING || process.env.STRIPE_PRICE_ID_BEST_MATES || null;
 };
 
@@ -192,9 +188,10 @@ module.exports = (dependencies) => {
 
     const nextSubscription = normalizeSubscription(user);
     const now = new Date();
-    const billingMode = checkoutSession.metadata?.billingMode === 'one_time' ? 'one_time' : 'auto_renew';
+    const isLegacyOneTimeCheckout =
+      checkoutSession.mode === 'payment' || checkoutSession.metadata?.billingMode === 'one_time';
 
-    if (billingMode === 'one_time' || checkoutSession.mode === 'payment') {
+    if (isLegacyOneTimeCheckout) {
       nextSubscription.status = 'active';
       nextSubscription.plan = 'premium';
       nextSubscription.billingMode = 'one_time';
@@ -204,39 +201,51 @@ module.exports = (dependencies) => {
       nextSubscription.currentPeriodEnd = calculateOneTimePeriodEnd(now);
       nextSubscription.cancelAtPeriodEnd = true;
       nextSubscription.gracePeriodEndsAt = null;
-    } else {
-      const stripeSubscriptionId =
-        typeof checkoutSession.subscription === 'string'
-          ? checkoutSession.subscription
-          : checkoutSession.subscription?.id || null;
 
-      let stripeSubscription = null;
-      if (stripeSubscriptionId) {
-        stripeSubscription = await stripe.subscriptions.retrieve(stripeSubscriptionId);
-      }
+      await upsertSubscriptionState(userEmail, nextSubscription);
+      await upsertCheckoutSuccessLog(user, checkoutSession, source);
 
-      nextSubscription.status = stripeSubscription?.status || 'active';
-      nextSubscription.plan = 'premium';
-      nextSubscription.billingMode = 'auto_renew';
-      nextSubscription.stripeCustomerId =
-        (stripeSubscription?.customer && typeof stripeSubscription.customer === 'string'
-          ? stripeSubscription.customer
-          : typeof checkoutSession.customer === 'string'
-          ? checkoutSession.customer
-          : null) || null;
-      nextSubscription.stripeSubscriptionId = stripeSubscriptionId;
-      nextSubscription.currentPeriodStart = stripeSubscription?.current_period_start
-        ? new Date(stripeSubscription.current_period_start * 1000)
-        : now;
-      nextSubscription.currentPeriodEnd = stripeSubscription?.current_period_end
-        ? new Date(stripeSubscription.current_period_end * 1000)
-        : calculateOneTimePeriodEnd(now);
-      nextSubscription.cancelAtPeriodEnd = Boolean(stripeSubscription?.cancel_at_period_end);
-      nextSubscription.gracePeriodEndsAt =
-        nextSubscription.status === 'past_due'
-          ? new Date(Date.now() + SUBSCRIPTION_GRACE_DAYS * 24 * 60 * 60 * 1000)
-          : null;
+      return {
+        paid: true,
+        userEmail,
+        subscription: nextSubscription,
+        amount: typeof checkoutSession.amount_total === 'number' ? checkoutSession.amount_total / 100 : 0,
+        currency: (checkoutSession.currency || 'AUD').toUpperCase(),
+        plan: checkoutSession.metadata?.plan || 'Best Mates',
+      };
     }
+
+    const stripeSubscriptionId =
+      typeof checkoutSession.subscription === 'string'
+        ? checkoutSession.subscription
+        : checkoutSession.subscription?.id || null;
+
+    let stripeSubscription = null;
+    if (stripeSubscriptionId) {
+      stripeSubscription = await stripe.subscriptions.retrieve(stripeSubscriptionId);
+    }
+
+    nextSubscription.status = stripeSubscription?.status || 'active';
+    nextSubscription.plan = 'premium';
+    nextSubscription.billingMode = 'auto_renew';
+    nextSubscription.stripeCustomerId =
+      (stripeSubscription?.customer && typeof stripeSubscription.customer === 'string'
+        ? stripeSubscription.customer
+        : typeof checkoutSession.customer === 'string'
+        ? checkoutSession.customer
+        : null) || null;
+    nextSubscription.stripeSubscriptionId = stripeSubscriptionId;
+    nextSubscription.currentPeriodStart = stripeSubscription?.current_period_start
+      ? new Date(stripeSubscription.current_period_start * 1000)
+      : now;
+    nextSubscription.currentPeriodEnd = stripeSubscription?.current_period_end
+      ? new Date(stripeSubscription.current_period_end * 1000)
+      : null;
+    nextSubscription.cancelAtPeriodEnd = Boolean(stripeSubscription?.cancel_at_period_end);
+    nextSubscription.gracePeriodEndsAt =
+      nextSubscription.status === 'past_due'
+        ? new Date(Date.now() + SUBSCRIPTION_GRACE_DAYS * 24 * 60 * 60 * 1000)
+        : null;
 
     await upsertSubscriptionState(userEmail, nextSubscription);
     await upsertCheckoutSuccessLog(user, checkoutSession, source);
@@ -426,8 +435,12 @@ module.exports = (dependencies) => {
         return res.status(400).json({ error: 'Missing required fields' });
       }
 
-      const selectedBillingMode = billingMode === 'one_time' ? 'one_time' : 'auto_renew';
-      const selectedPriceId = getBillingPriceId(selectedBillingMode);
+      if (billingMode === 'one_time') {
+        return res.status(400).json({ error: 'One-time payments are no longer available. Please use auto-renew.' });
+      }
+
+      const selectedBillingMode = 'auto_renew';
+      const selectedPriceId = getBillingPriceId();
       if (!selectedPriceId) {
         return res.status(500).json({ error: `Missing Stripe price ID for billing mode: ${selectedBillingMode}` });
       }
@@ -447,7 +460,7 @@ module.exports = (dependencies) => {
             quantity: 1,
           },
         ],
-        mode: selectedBillingMode === 'one_time' ? 'payment' : 'subscription',
+        mode: 'subscription',
         success_url: `${origin}/success?session_id={CHECKOUT_SESSION_ID}`,
         cancel_url: `${origin}/cancel?session_id={CHECKOUT_SESSION_ID}`,
         customer_email: userEmail,
@@ -960,6 +973,7 @@ module.exports = (dependencies) => {
       }
 
       const entitlementAfterCancel = isSubscriptionEntitled(nextSubscription);
+      const cancellationTarget = nextSubscription.stripeSubscriptionId || 'legacy_one_time';
 
       const updateData = {
         isSubscribed: entitlementAfterCancel,
@@ -974,7 +988,7 @@ module.exports = (dependencies) => {
       };
       await usersStorage.updateOne({ userEmail }, { $set: updateData });
       // Add cancellation log to subscriptionStorage (idempotent)
-      const subscriptionCancelKey = `${userEmail}:${nextSubscription.stripeSubscriptionId || 'one_time'}:${
+      const subscriptionCancelKey = `${userEmail}:${cancellationTarget}:${
         nextSubscription.currentPeriodEnd ? new Date(nextSubscription.currentPeriodEnd).toISOString() : 'na'
       }`;
 

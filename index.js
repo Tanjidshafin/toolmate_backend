@@ -55,10 +55,6 @@ const validateStripeEnv = () => {
     missing.push('STRIPE_WEBHOOK_SECRET');
   }
 
-  if (!process.env.STRIPE_PRICE_ID_BEST_MATES_ONE_TIME) {
-    missing.push('STRIPE_PRICE_ID_BEST_MATES_ONE_TIME');
-  }
-
   if (!(process.env.STRIPE_PRICE_ID_BEST_MATES_RECURRING || process.env.STRIPE_PRICE_ID_BEST_MATES)) {
     missing.push('STRIPE_PRICE_ID_BEST_MATES_RECURRING (or STRIPE_PRICE_ID_BEST_MATES)');
   }
@@ -149,6 +145,9 @@ async function run() {
       sessionsStorage.createIndex({ sessionId: 1, userEmail: 1 }),
       testimonialsStorage.createIndex({ isVisible: 1, createdAt: -1 }),
       testimonialsStorage.createIndex({ deletedAt: 1, createdAt: -1 }),
+      testimonialsStorage.createIndex({ status: 1, createdAt: -1 }),
+      testimonialsStorage.createIndex({ userEmail: 1, deletedAt: 1, status: 1 }),
+      testimonialsStorage.createIndex({ guestToken: 1, deletedAt: 1, status: 1 }),
     ]);
     emailService = new EmailService(emailLogsStorage);
     emailTriggers = new EmailTriggers(emailService);

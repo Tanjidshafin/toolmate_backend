@@ -82,8 +82,9 @@ const reconcileSingleUser = async ({ usersStorage, subscriptionStorage, auditLog
   const currentEntitled = isSubscriptionEntitled(current, now);
 
   const next = { ...current };
+  const isLegacyOneTime = next.billingMode === 'one_time';
 
-  if (next.billingMode === 'one_time') {
+  if (isLegacyOneTime) {
     if (!next.currentPeriodStart && user.createdAt) {
       next.currentPeriodStart = new Date(user.createdAt);
     }
@@ -103,7 +104,7 @@ const reconcileSingleUser = async ({ usersStorage, subscriptionStorage, auditLog
     next.gracePeriodEndsAt = null;
   }
 
-  if (next.billingMode === 'auto_renew' && next.stripeSubscriptionId) {
+  if (!isLegacyOneTime && next.stripeSubscriptionId) {
     try {
       const stripeSub = await stripe.subscriptions.retrieve(next.stripeSubscriptionId);
       next.status = stripeSub.status || next.status;
