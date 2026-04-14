@@ -429,7 +429,9 @@ module.exports = ({
   router.get('/admin/sessions', async (req, res) => {
     try {
       const { page = 1, limit = 20, search, lightweight = 'false' } = req.query;
-      const skip = (page - 1) * limit;
+      const pageNumber = Math.max(Number.parseInt(page, 10) || 1, 1);
+      const limitNumber = Math.min(Math.max(Number.parseInt(limit, 10) || 20, 1), 100);
+      const skip = (pageNumber - 1) * limitNumber;
       const matchStage = {};
       if (search) {
         matchStage.$or = [
@@ -440,6 +442,7 @@ module.exports = ({
 
       const pipeline = [
         { $match: matchStage },
+        { $sort: { timestamp: -1 } },
         {
           $addFields: {
             normalizedEmail: {
@@ -451,7 +454,6 @@ module.exports = ({
             },
           },
         },
-        { $sort: { timestamp: -1 } },
         {
           $group: {
             _id: {
@@ -463,7 +465,7 @@ module.exports = ({
         },
         { $replaceRoot: { newRoot: '$latestSession' } },
         { $skip: skip },
-        { $limit: Number.parseInt(limit) },
+        { $limit: limitNumber },
       ];
       if (lightweight === 'true') {
         pipeline.push({
@@ -538,15 +540,15 @@ module.exports = ({
               },
             },
             { $count: 'total' },
-          ])
+          ], { allowDiskUse: true })
           .toArray(),
       ]);
       const total = totalResult[0]?.total || 0;
       res.json({
         sessions,
         pagination: {
-          current: Number.parseInt(page),
-          total: Math.ceil(total / limit),
+          current: pageNumber,
+          total: Math.ceil(total / limitNumber),
           count: total,
         },
       });
