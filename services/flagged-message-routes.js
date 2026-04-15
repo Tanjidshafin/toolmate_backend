@@ -7,7 +7,9 @@ module.exports = ({ flaggedMessagesStorage, sessionsStorage, usersStorage, audit
   router.get("/admin/flagged-messages/lightweight", async (req, res) => {
     try {
       const { status, page = 1, limit = 20, search } = req.query
-      const skip = (page - 1) * limit
+      const numericPage = Math.max(Number.parseInt(page, 10) || 1, 1)
+      const numericLimit = Math.max(Number.parseInt(limit, 10) || 20, 1)
+      const skip = (numericPage - 1) * numericLimit
       const query = {
         $or: [{ expiresAt: { $exists: false } }, { expiresAt: { $gt: new Date() } }],
       }
@@ -28,18 +30,25 @@ module.exports = ({ flaggedMessagesStorage, sessionsStorage, usersStorage, audit
             status: 1,
             flaggedAt: 1,
             messageText: 1,
+            reasons: 1,
+            otherReason: 1,
+            messageTimestamp: 1,
+            adminComments: 1,
+            reviewedBy: 1,
+            reviewedAt: 1,
+            isLoggedInUser: 1,
           },
         })
         .sort({ flaggedAt: -1 })
         .skip(skip)
-        .limit(Number.parseInt(limit))
+        .limit(numericLimit)
         .toArray()
       const total = await flaggedMessagesStorage.countDocuments(query)
       res.json({
         flaggedMessages,
         pagination: {
-          current: Number.parseInt(page),
-          total: Math.ceil(total / limit),
+          current: numericPage,
+          total: Math.ceil(total / numericLimit),
           count: total,
         },
       })

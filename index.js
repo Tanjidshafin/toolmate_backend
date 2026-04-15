@@ -117,7 +117,7 @@ async function run() {
 
     await client.connect();
     await client.db('admin').command({ ping: 1 });
-    console.log('✅ Connected to MongoDB!');
+    console.log('Connected to MongoDB!');
     feedbackStorage = client.db('Toolmate').collection('Feedbacks');
     messagesStorage = client.db('Toolmate').collection('Messages');
     toolsStorage = client.db('Toolmate').collection('Tools');
@@ -160,14 +160,11 @@ async function run() {
       };
     }
     io.on('connection', (socket) => {
-      console.log('Admin connected for real-time monitoring:', socket.id);
       socket.on('join-monitoring', (data) => {
-        console.log('Client joined monitoring room:', socket.id);
         socket.join('admin-monitoring');
       });
 
       socket.on('join-boost-monitoring', (data) => {
-        console.log('⏱Client joined boost monitoring:', socket.id);
         socket.join('boost-monitoring');
       });
 
@@ -223,11 +220,6 @@ async function run() {
             userEmail: userDetails?.userEmail || 'Unknown',
             userName: userDetails?.userName || 'Unknown User',
           });
-          console.log(
-            `📤 Admin ${socket.id} injected message to session ${data.sessionId} for user ${
-              userDetails?.userName || 'Unknown'
-            }`,
-          );
         } catch (error) {
           console.error('Error injecting message:', error);
           io.to('admin-monitoring').emit('injected-message-confirmation', {
@@ -362,14 +354,11 @@ async function run() {
             timestamp: now,
             count: usersNeedingReset.length,
           });
-
-          console.log(`Reset daily limits for ${usersNeedingReset.length} users at ${now.toISOString()}`);
         }
       } catch (error) {
         console.error('Error in daily limit reset cron job:', error);
       }
     });
-
     cron.schedule(SUBSCRIPTION_RECONCILIATION_CRON, async () => {
       try {
         const summary = await reconcileSubscriptionState({
@@ -377,10 +366,6 @@ async function run() {
           subscriptionStorage,
           auditLogger,
         });
-
-        console.log(
-          `Subscription reconciliation complete. scanned=${summary.scanned}, changed=${summary.changed}, failed=${summary.failed}`,
-        );
       } catch (error) {
         console.error('Error in subscription reconciliation cron job:', error);
       }
@@ -475,14 +460,12 @@ async function run() {
           },
         });
         io.to('admin-monitoring').emit('new-live-message', payload);
-        console.log('Emitted new-live-message to admin-monitoring room:', payload.sessionId);
       } catch (error) {
         console.error('Error emitting new live message:', error);
       }
     }
     function notifyActiveSessionsChanged() {
       io.to('admin-monitoring').emit('active-sessions-changed');
-      console.log('Emitted active-sessions-changed to admin-monitoring room');
     }
     const routeDependencies = {
       feedbackStorage,
@@ -547,8 +530,6 @@ async function run() {
     server.listen(PORT, () => {
       console.log(`Server is running on port ${PORT}`);
       console.log(`Socket.io server is ready`);
-      console.log(`Boost expiry cron job scheduled`);
-      console.log(`Subscription reconciliation cron scheduled: ${SUBSCRIPTION_RECONCILIATION_CRON}`);
     });
   } catch (err) {
     console.error('MongoDB connection error:', err);
