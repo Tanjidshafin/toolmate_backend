@@ -538,9 +538,6 @@ module.exports = ({
       return res.status(500).json({ error: 'Failed to bootstrap session' });
     }
   });
-
-  // Hard-clear a session: wipes every messagesJob row for the session and resets the
-  // mateyChatSessions counters so the Job Tab card disappears until a new message arrives.
   router.delete('/chat/sessions/:sessionId', async (req, res) => {
     try {
       const { sessionId } = req.params;
