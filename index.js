@@ -38,6 +38,7 @@ const shedToolRoutes = require('./services/shed-tool-routes');
 const emailLogRoutes = require('./services/email-log-routes');
 const auditLogRoutes = require('./services/audit-log-routes');
 const jobLogsRoutes = require('./services/job-logs-routes');
+const messagesJobRoutes = require('./services/messages-job-routes');
 const blogRoutes = require('./services/blogs-route');
 const subscriptionRoutes = require('./services/subscription-routes');
 const storeLocationRoutes = require('./services/store-location');
@@ -64,7 +65,12 @@ const validateStripeEnv = () => {
   }
 };
 
-const SUBSCRIPTION_RECONCILIATION_CRON = process.env.SUBSCRIPTION_RECONCILIATION_CRON || '0 * * * *';
+// Daily at 12:00 AM by default. Override with SUBSCRIPTION_RECONCILIATION_CRON for
+// tighter cadence (e.g. hourly `0 * * * *`) and set SUBSCRIPTION_RECONCILIATION_TIMEZONE
+// (IANA zone such as `Australia/Sydney`) if the server runs in UTC but billing is scoped
+// to a specific locale. Without a timezone the schedule uses the host's local time.
+const SUBSCRIPTION_RECONCILIATION_CRON = process.env.SUBSCRIPTION_RECONCILIATION_CRON || '0 0 * * *';
+const SUBSCRIPTION_RECONCILIATION_TIMEZONE = process.env.SUBSCRIPTION_RECONCILIATION_TIMEZONE || null;
 
 app.use(cors());
 app.use(
@@ -99,6 +105,8 @@ let shedToolsStorage;
 let emailLogsStorage;
 let auditLogsStorage;
 let jobLogsStorage;
+let messagesJobStorage;
+let mateyChatSessionsStorage;
 let blogsStorage;
 let storeLocationStorage;
 let subscriptionStorage;
@@ -131,6 +139,8 @@ async function run() {
     emailLogsStorage = client.db('Toolmate').collection('EmailLogs');
     auditLogsStorage = client.db('Toolmate').collection('AuditLogs');
     jobLogsStorage = client.db('Toolmate').collection('JobLogs');
+    messagesJobStorage = client.db('Toolmate').collection('MessagesJob');
+    mateyChatSessionsStorage = client.db('Toolmate').collection('MateyChatSessions');
     blogsStorage = client.db('Toolmate').collection('Blogs');
     adminCredentialsStorage = client.db('Toolmate').collection('AdminCredentials');
     subscriptionStorage = client.db('Toolmate').collection('Subscriptions');
@@ -140,6 +150,56 @@ async function run() {
     storeLocationStorage = client.db('Toolmate').collection('StoreLocations');
     testimonialsStorage = client.db('Toolmate').collection('Testimonials');
 
+    // Reconcile MessagesJob idempotency index. Older deployments created a unique sparse index
+    // on (sessionId, clientMessageId) with the default name "sessionId_1_clientMessageId_1".
+    // We now want a partial unique index named "mj_session_clientMessage_unique". Matching keys
+    // with different options (sparse vs partialFilterExpression) cause IndexKeySpecsConflict (86)
+    // if the legacy index isn't removed first.
+    const DESIRED_MJ_IDX_NAME = 'mj_session_clientMessage_unique';
+    try {
+      const existingIndexes = await messagesJobStorage.indexes();
+      const sameKey = (idx) =>
+        idx?.key && idx.key.sessionId === 1 && idx.key.clientMessageId === 1 && Object.keys(idx.key).length === 2;
+      for (const idx of existingIndexes) {
+        if (!sameKey(idx) || idx.name === DESIRED_MJ_IDX_NAME) continue;
+        try {
+          await messagesJobStorage.dropIndex(idx.name);
+          console.log(`MessagesJob: dropped legacy index "${idx.name}" to allow ${DESIRED_MJ_IDX_NAME}`);
+        } catch (dropErr) {
+          const msg = String(dropErr?.message || '');
+          const ignorable =
+            dropErr?.codeName === 'IndexNotFound' || dropErr?.code === 203 || /index not found/i.test(msg);
+          if (!ignorable) {
+            console.warn(`MessagesJob: failed to drop legacy index "${idx.name}":`, msg || dropErr);
+          }
+        }
+      }
+    } catch (listErr) {
+      console.warn('MessagesJob: could not list indexes for reconcile:', listErr?.message || listErr);
+    }
+
+    const createMessagesJobUniqueIndex = async () => {
+      try {
+        await messagesJobStorage.createIndex(
+          { sessionId: 1, clientMessageId: 1 },
+          {
+            unique: true,
+            name: DESIRED_MJ_IDX_NAME,
+            partialFilterExpression: { clientMessageId: { $type: 'string' } },
+          },
+        );
+      } catch (err) {
+        if (err?.code === 86 || err?.codeName === 'IndexKeySpecsConflict') {
+          console.error(
+            `MessagesJob: IndexKeySpecsConflict creating ${DESIRED_MJ_IDX_NAME}. A conflicting index on` +
+              ' (sessionId, clientMessageId) still exists. Drop it in MongoDB (Compass/mongosh) and restart.' +
+              ' Example: db.MessagesJob.dropIndex("sessionId_1_clientMessageId_1")',
+          );
+        }
+        throw err;
+      }
+    };
+
     await Promise.all([
       sessionsStorage.createIndex({ timestamp: -1, sessionId: 1, userEmail: 1 }),
       sessionsStorage.createIndex({ sessionId: 1, userEmail: 1 }),
@@ -148,6 +208,12 @@ async function run() {
       testimonialsStorage.createIndex({ status: 1, createdAt: -1 }),
       testimonialsStorage.createIndex({ userEmail: 1, deletedAt: 1, status: 1 }),
       testimonialsStorage.createIndex({ guestToken: 1, deletedAt: 1, status: 1 }),
+      messagesJobStorage.createIndex({ sessionId: 1, createdAt: -1, _id: -1 }),
+      createMessagesJobUniqueIndex(),
+      messagesJobStorage.createIndex({ userId: 1, createdAt: -1 }),
+      mateyChatSessionsStorage.createIndex({ sessionId: 1 }, { unique: true }),
+      mateyChatSessionsStorage.createIndex({ userId: 1, lastMessageAt: -1 }),
+      mateyChatSessionsStorage.createIndex({ userEmail: 1, lastMessageAt: -1 }),
     ]);
     emailService = new EmailService(emailLogsStorage);
     emailTriggers = new EmailTriggers(emailService);
@@ -160,11 +226,14 @@ async function run() {
       };
     }
     io.on('connection', (socket) => {
+      console.log('Admin connected for real-time monitoring:', socket.id);
       socket.on('join-monitoring', (data) => {
+        console.log('Client joined monitoring room:', socket.id);
         socket.join('admin-monitoring');
       });
 
       socket.on('join-boost-monitoring', (data) => {
+        console.log('⏱Client joined boost monitoring:', socket.id);
         socket.join('boost-monitoring');
       });
 
@@ -220,6 +289,11 @@ async function run() {
             userEmail: userDetails?.userEmail || 'Unknown',
             userName: userDetails?.userName || 'Unknown User',
           });
+          console.log(
+            `📤 Admin ${socket.id} injected message to session ${data.sessionId} for user ${
+              userDetails?.userName || 'Unknown'
+            }`,
+          );
         } catch (error) {
           console.error('Error injecting message:', error);
           io.to('admin-monitoring').emit('injected-message-confirmation', {
@@ -354,22 +428,33 @@ async function run() {
             timestamp: now,
             count: usersNeedingReset.length,
           });
+
+          console.log(`Reset daily limits for ${usersNeedingReset.length} users at ${now.toISOString()}`);
         }
       } catch (error) {
         console.error('Error in daily limit reset cron job:', error);
       }
     });
-    cron.schedule(SUBSCRIPTION_RECONCILIATION_CRON, async () => {
-      try {
-        const summary = await reconcileSubscriptionState({
-          usersStorage,
-          subscriptionStorage,
-          auditLogger,
-        });
-      } catch (error) {
-        console.error('Error in subscription reconciliation cron job:', error);
-      }
-    });
+
+    cron.schedule(
+      SUBSCRIPTION_RECONCILIATION_CRON,
+      async () => {
+        try {
+          const summary = await reconcileSubscriptionState({
+            usersStorage,
+            subscriptionStorage,
+            auditLogger,
+          });
+
+          console.log(
+            `Subscription reconciliation complete. scanned=${summary.scanned}, changed=${summary.changed}, failed=${summary.failed}`,
+          );
+        } catch (error) {
+          console.error('Error in subscription reconciliation cron job:', error);
+        }
+      },
+      SUBSCRIPTION_RECONCILIATION_TIMEZONE ? { timezone: SUBSCRIPTION_RECONCILIATION_TIMEZONE } : undefined,
+    );
     cron.schedule('*/1 * * * *', async () => {
       try {
         const now = new Date();
@@ -460,14 +545,17 @@ async function run() {
           },
         });
         io.to('admin-monitoring').emit('new-live-message', payload);
+        console.log('Emitted new-live-message to admin-monitoring room:', payload.sessionId);
       } catch (error) {
         console.error('Error emitting new live message:', error);
       }
     }
     function notifyActiveSessionsChanged() {
       io.to('admin-monitoring').emit('active-sessions-changed');
+      console.log('Emitted active-sessions-changed to admin-monitoring room');
     }
     const routeDependencies = {
+      mongoClient: client,
       feedbackStorage,
       messagesStorage,
       toolsStorage,
@@ -481,6 +569,8 @@ async function run() {
       emailLogsStorage,
       auditLogsStorage,
       jobLogsStorage,
+      messagesJobStorage,
+      mateyChatSessionsStorage,
       adminCredentialsStorage,
       emailService,
       emailTriggers,
@@ -516,6 +606,7 @@ async function run() {
     app.use('/', emailLogRoutes(routeDependencies));
     app.use('/', auditLogRoutes(routeDependencies));
     app.use('/', jobLogsRoutes(routeDependencies));
+    app.use('/', messagesJobRoutes(routeDependencies));
     app.use('/', subscriptionRoutes(routeDependencies));
     app.use('/', blogRoutes(routeDependencies));
     app.use('/', storeLocationRoutes(routeDependencies));
@@ -530,6 +621,11 @@ async function run() {
     server.listen(PORT, () => {
       console.log(`Server is running on port ${PORT}`);
       console.log(`Socket.io server is ready`);
+      console.log(`Boost expiry cron job scheduled`);
+      console.log(
+        `Subscription reconciliation cron scheduled: ${SUBSCRIPTION_RECONCILIATION_CRON}` +
+          (SUBSCRIPTION_RECONCILIATION_TIMEZONE ? ` (timezone: ${SUBSCRIPTION_RECONCILIATION_TIMEZONE})` : ' (server local time)'),
+      );
     });
   } catch (err) {
     console.error('MongoDB connection error:', err);

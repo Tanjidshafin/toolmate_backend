@@ -7,6 +7,26 @@ const ONE_TIME_SUBSCRIPTION_DAYS = Number.parseInt(process.env.ONE_TIME_SUBSCRIP
 
 const ACTIVE_STATUSES = new Set(['active', 'trialing']);
 
+// Stripe terminal states that should drop the user back to the free plan in our DB.
+// `past_due` is intentionally excluded because we hold a grace window for it.
+const TERMINAL_STATUSES = new Set([
+  'canceled',
+  'unpaid',
+  'incomplete_expired',
+  'paused',
+  'inactive',
+]);
+
+// A user's stored plan should follow entitlement, not just the fact that we once sold
+// them a subscription. We keep `premium` only while they are active/trialing or inside
+// the past_due grace window; terminal states always collapse to `free`.
+const derivePlanFromStatus = (status) => {
+  if (!status) return 'free';
+  if (ACTIVE_STATUSES.has(status) || status === 'past_due') return 'premium';
+  if (TERMINAL_STATUSES.has(status)) return 'free';
+  return 'free';
+};
+
 const normalizeSubscription = (user) => {
   const legacyActive = Boolean(user?.isSubscribed);
   const subscription = user?.subscription || {};
@@ -226,7 +246,7 @@ module.exports = (dependencies) => {
     }
 
     nextSubscription.status = stripeSubscription?.status || 'active';
-    nextSubscription.plan = 'premium';
+    nextSubscription.plan = derivePlanFromStatus(nextSubscription.status);
     nextSubscription.billingMode = 'auto_renew';
     nextSubscription.stripeCustomerId =
       (stripeSubscription?.customer && typeof stripeSubscription.customer === 'string'
@@ -275,7 +295,7 @@ module.exports = (dependencies) => {
 
     const nextSubscription = normalizeSubscription(user);
     nextSubscription.status = stripeSubscription.status || 'inactive';
-    nextSubscription.plan = 'premium';
+    nextSubscription.plan = derivePlanFromStatus(nextSubscription.status);
     nextSubscription.billingMode = 'auto_renew';
     nextSubscription.stripeCustomerId = customerId;
     nextSubscription.stripeSubscriptionId = stripeSubscription.id;
@@ -736,6 +756,19 @@ module.exports = (dependencies) => {
         normalizedSubscription.plan = 'free';
         normalizedSubscription.gracePeriodEndsAt = null;
         await upsertSubscriptionState(userEmail, normalizedSubscription);
+      }
+
+      // Defensive: older rows may still have `plan='premium'` alongside a terminal status
+      // (e.g. `canceled`). Normalize on read so the client never sees the mismatched
+      // "Best Mate + Canceled" pair, and persist the correction opportunistically.
+      const expectedPlan = derivePlanFromStatus(normalizedSubscription.status);
+      if (normalizedSubscription.plan !== expectedPlan) {
+        normalizedSubscription.plan = expectedPlan;
+        try {
+          await upsertSubscriptionState(userEmail, normalizedSubscription);
+        } catch (persistError) {
+          console.warn('Failed to self-heal subscription plan field:', persistError);
+        }
       }
 
       const entitled = isSubscriptionEntitled(normalizedSubscription, now);
