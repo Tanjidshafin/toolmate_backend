@@ -1,10 +1,6 @@
 const express = require('express');
 const { ObjectId } = require('mongodb');
 const { createChatRateLimiter } = require('./chat-rate-limit');
-
-// Single source of truth for cursor pagination across the stack. The React app and the
-// admin dashboard both import this (via the client-side mirror) so changing it here changes
-// "Load more" batch size everywhere.
 const CURSOR_DATA_SIZE = 5;
 const DEFAULT_PAGE_SIZE = CURSOR_DATA_SIZE;
 const MAX_PAGE_SIZE = 100;
@@ -81,7 +77,6 @@ const toPublicMessage = (doc) => {
     images: normalizeArray(doc.images),
     suggestedTools: normalizeArray(doc.suggestedTools),
     toolsUsed: normalizeArray(doc.toolsUsed),
-    // Top-level boolean so clients don't have to dig into metadata; backfilled for legacy rows.
     isToolSuggestion: computeIsToolSuggestion(doc),
     metadata: doc.metadata && typeof doc.metadata === 'object' ? doc.metadata : {},
     createdAt: doc.createdAt,
@@ -114,28 +109,20 @@ module.exports = ({
     perDay: Number.parseInt(process.env.CHAT_RATE_PER_DAY, 10) || 500,
     imagePerDay: Number.parseInt(process.env.CHAT_IMAGE_PER_DAY, 10) || 25,
   });
-
-  // Session counters and title are kept strictly consistent with every message write.
-  // We use a Mongo transaction when the deployment is a replica set; otherwise we fall back
-  // to ordered writes so local (standalone) environments still work.
   const supportsTransactions = () => {
     return !!(mongoClient && typeof mongoClient.startSession === 'function' && process.env.MONGO_TRANSACTIONS !== 'false');
   };
-
   const persistMessageAtomic = async ({ messageDoc, sessionDelta }) => {
     const { sessionId } = messageDoc;
     const now = messageDoc.createdAt;
-
     const incomingTitle = sessionDelta.titleCandidate;
-
-    // MongoDB rejects the same path in both $setOnInsert and $inc. Counters are omitted from
-    // $setOnInsert because $inc on an upsert initializes missing fields to 0 + delta, which is
-    // exactly what we want for a freshly created session document.
+    const totalSuggestedToolsIncrement = normalizeArray(messageDoc.suggestedTools).length;
     const sessionUpdate = {
       $setOnInsert: {
         sessionId,
         title: incomingTitle || DEFAULT_TITLE,
         createdAt: now,
+        totalSuggestedTools: 0,
       },
       $set: {
         updatedAt: now,
@@ -148,18 +135,15 @@ module.exports = ({
         messageCount: 1,
         userMessageCount: messageDoc.role === 'user' ? 1 : 0,
         mateyMessageCount: messageDoc.role === 'matey' ? 1 : 0,
+        totalSuggestedTools: totalSuggestedToolsIncrement,
       },
     };
-
     if (incomingTitle) {
-      // Only set title when current value is still the default. Concurrent writers stay safe
-      // because $set happens on the default branch only.
       await mateyChatSessionsStorage.updateOne(
         { sessionId, title: DEFAULT_TITLE },
         { $set: { title: incomingTitle } },
       );
     }
-
     if (supportsTransactions()) {
       const session = mongoClient.startSession();
       try {
@@ -177,12 +161,10 @@ module.exports = ({
         await session.endSession();
       }
     }
-
     const insertResult = await messagesJobStorage.insertOne(messageDoc);
     await mateyChatSessionsStorage.updateOne({ sessionId }, sessionUpdate, { upsert: true });
     return insertResult;
   };
-
   router.post('/chat/session/init', async (req, res) => {
     try {
       const {
@@ -208,6 +190,7 @@ module.exports = ({
             messageCount: 0,
             userMessageCount: 0,
             mateyMessageCount: 0,
+            totalSuggestedTools: 0,
             ...(userId ? { userId } : {}),
           },
           $set: {
@@ -254,8 +237,6 @@ module.exports = ({
 
       const normalizedRole = normalizeRole(role);
       const now = new Date();
-
-      // Idempotency: reuse the stored row when the client retries with the same clientMessageId.
       if (clientMessageId) {
         const existing = await messagesJobStorage.findOne({ sessionId, clientMessageId });
         if (existing) {
@@ -281,8 +262,6 @@ module.exports = ({
         images: normalizedImages,
         suggestedTools: normalizedSuggestedTools,
         toolsUsed: normalizeArray(toolsUsed),
-        // First-class chat data: tool rows are flagged at the top level so queries and the
-        // admin dashboard don't need to peek into metadata.
         isToolSuggestion,
         metadata: normalizedMetadata,
         clientMessageId,
@@ -477,6 +456,7 @@ module.exports = ({
           messageCount: 1,
           userMessageCount: 1,
           mateyMessageCount: 1,
+          totalSuggestedTools: 1,
           createdAt: 1,
           updatedAt: 1,
           lastMessageAt: 1,
@@ -493,10 +473,6 @@ module.exports = ({
       return res.status(500).json({ error: 'Failed to fetch sessions' });
     }
   });
-
-  // One-shot hydration used by the React client when (re)opening a session. Combines the
-  // session doc and the newest `limit` messages so the UI reconstructs state from a single
-  // round-trip and never needs to fall back to localStorage.
   router.get('/chat/sessions/:sessionId/bootstrap', async (req, res) => {
     try {
       const { sessionId } = req.params;
@@ -555,6 +531,7 @@ module.exports = ({
               messageCount: 0,
               userMessageCount: 0,
               mateyMessageCount: 0,
+              totalSuggestedTools: 0,
               title: DEFAULT_TITLE,
               updatedAt: now,
               lastMessageAt: now,
@@ -632,6 +609,7 @@ module.exports = ({
               messageCount: 1,
               userMessageCount: 1,
               mateyMessageCount: 1,
+              totalSuggestedTools: 1,
               createdAt: 1,
               updatedAt: 1,
               lastMessageAt: 1,
