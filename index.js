@@ -21,8 +21,10 @@ const io = new Server(server, {
     origin: '*',
     methods: ['GET', 'POST'],
   },
-  pingInterval: 30000,
-  pingTimeout: 5000,
+  transports: ['websocket'],
+  pingInterval: 25000,
+  pingTimeout: 20000,
+  connectTimeout: 20000,
 });
 const feedbackRoutes = require('./services/feedback-routes');
 const messageRoutes = require('./services/message-routes');
@@ -226,7 +228,21 @@ async function run() {
       };
     }
     io.on('connection', (socket) => {
-      console.log('Admin connected for real-time monitoring:', socket.id);
+      console.log(
+        'Admin connected for real-time monitoring:',
+        socket.id,
+        'Transport:',
+        socket.conn?.transport?.name || 'unknown',
+      );
+
+      socket.conn.on('upgrade', (transport) => {
+        console.log('Socket transport upgraded:', socket.id, '->', transport?.name || 'unknown');
+      });
+
+      socket.conn.on('error', (error) => {
+        console.error('Socket connection transport error:', socket.id, error?.message || error);
+      });
+
       socket.on('join-monitoring', (data) => {
         console.log('Client joined monitoring room:', socket.id);
         socket.join('admin-monitoring');
@@ -371,6 +387,20 @@ async function run() {
       socket.on('disconnect', (reason) => {
         console.log('Admin disconnected from monitoring:', socket.id, 'Reason:', reason);
       });
+    });
+
+    io.engine.on('connection_error', (err) => {
+      console.error(
+        'Socket.IO engine connection error:',
+        'code=',
+        err?.code,
+        'message=',
+        err?.message,
+        'transport=',
+        err?.context?.transport,
+        'url=',
+        err?.req?.url,
+      );
     });
     cron.schedule('*/1 * * * *', async () => {
       try {

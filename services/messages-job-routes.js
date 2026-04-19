@@ -201,7 +201,6 @@ module.exports = ({
             userMessageCount: 0,
             mateyMessageCount: 0,
             totalSuggestedTools: 0,
-            ...(userId ? { userId } : {}),
           },
           $set: {
             updatedAt: now,
