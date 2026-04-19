@@ -117,6 +117,19 @@ module.exports = ({
     const now = messageDoc.createdAt;
     const incomingTitle = sessionDelta.titleCandidate;
     const totalSuggestedToolsIncrement = normalizeArray(messageDoc.suggestedTools).length;
+    const sessionCountersInc = {
+      messageCount: 1,
+      userMessageCount: messageDoc.role === 'user' ? 1 : 0,
+      mateyMessageCount: messageDoc.role === 'matey' ? 1 : 0,
+    };
+    const incrementSuggestedTools = async (options = undefined) => {
+      if (totalSuggestedToolsIncrement <= 0) return;
+      await mateyChatSessionsStorage.updateOne(
+        { sessionId },
+        { $inc: { totalSuggestedTools: totalSuggestedToolsIncrement } },
+        options,
+      );
+    };
     const sessionUpdate = {
       $setOnInsert: {
         sessionId,
@@ -131,12 +144,7 @@ module.exports = ({
         ...(sessionDelta.userEmail ? { userEmail: sessionDelta.userEmail } : {}),
         ...(sessionDelta.userName ? { userName: sessionDelta.userName } : {}),
       },
-      $inc: {
-        messageCount: 1,
-        userMessageCount: messageDoc.role === 'user' ? 1 : 0,
-        mateyMessageCount: messageDoc.role === 'matey' ? 1 : 0,
-        totalSuggestedTools: totalSuggestedToolsIncrement,
-      },
+      $inc: sessionCountersInc,
     };
     if (incomingTitle) {
       await mateyChatSessionsStorage.updateOne(
@@ -155,6 +163,7 @@ module.exports = ({
             upsert: true,
             session,
           });
+          await incrementSuggestedTools({ session });
         });
         return inserted;
       } finally {
@@ -163,6 +172,7 @@ module.exports = ({
     }
     const insertResult = await messagesJobStorage.insertOne(messageDoc);
     await mateyChatSessionsStorage.updateOne({ sessionId }, sessionUpdate, { upsert: true });
+    await incrementSuggestedTools();
     return insertResult;
   };
   router.post('/chat/session/init', async (req, res) => {
