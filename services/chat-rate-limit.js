@@ -17,9 +17,14 @@ const getBucket = (key, windowMs) => {
 };
 
 const clientKey = (req, sessionId) => {
-  const auth = req.body?.userId || req.body?.userEmail || req.query?.userId || req.query?.userEmail;
-  if (auth) {
-    return `user:${auth}`;
+  const verifiedAuth = req.authUser?.userId || req.authUser?.userEmail;
+  if (verifiedAuth) {
+    return `user:${verifiedAuth}`;
+  }
+
+  const untrustedAuth = req.body?.userId || req.body?.userEmail || req.query?.userId || req.query?.userEmail;
+  if (untrustedAuth) {
+    return `untrusted:${untrustedAuth}`;
   }
   const ip = req.ip || req.connection?.remoteAddress || 'unknown';
   return `anon:${ip}:${sessionId || 'nosession'}`;

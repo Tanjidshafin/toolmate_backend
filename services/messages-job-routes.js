@@ -1,7 +1,8 @@
 const express = require('express');
 const { ObjectId } = require('mongodb');
 const { createChatRateLimiter } = require('./chat-rate-limit');
-const CURSOR_DATA_SIZE = 5;
+const { createRequireAuth, normalizeEmail } = require('./auth-middleware');
+const CURSOR_DATA_SIZE = 30;
 const DEFAULT_PAGE_SIZE = CURSOR_DATA_SIZE;
 const MAX_PAGE_SIZE = 100;
 const DEFAULT_TITLE = 'New Chat';
@@ -96,12 +97,88 @@ module.exports = ({
   notifyActiveSessionsChanged,
 }) => {
   const router = express.Router();
+  const requireAuth = createRequireAuth({ usersStorage });
 
   const normalizeEmailValue = (email) => {
     if (Array.isArray(email)) {
-      return email[0] || null;
+      return normalizeEmail(email[0]);
     }
-    return email || null;
+    return normalizeEmail(email);
+  };
+
+  const isSameOwner = (sessionDoc, authUser) => {
+    if (!sessionDoc || !authUser) return false;
+
+    if (sessionDoc.userId && authUser.userId && sessionDoc.userId === authUser.userId) {
+      return true;
+    }
+
+    const sessionEmail = normalizeEmailValue(sessionDoc.userEmail);
+    if (sessionEmail && authUser.userEmail && sessionEmail === authUser.userEmail) {
+      return true;
+    }
+
+    return false;
+  };
+
+  const isUnownedSession = (sessionDoc) => {
+    if (!sessionDoc) return true;
+    const sessionEmail = normalizeEmailValue(sessionDoc.userEmail);
+    return !sessionDoc.userId && !sessionEmail;
+  };
+
+  const claimLegacyUnownedSession = async (sessionId, authUser) => {
+    if (!authUser?.userId) return null;
+    const now = new Date();
+
+    await mateyChatSessionsStorage.updateOne(
+      {
+        sessionId,
+        $or: [
+          { userId: { $exists: false } },
+          { userId: null },
+          { userId: '' },
+        ],
+      },
+      {
+        $set: {
+          userId: authUser.userId,
+          ...(authUser.userEmail ? { userEmail: authUser.userEmail } : {}),
+          updatedAt: now,
+        },
+      },
+    );
+
+    return mateyChatSessionsStorage.findOne({ sessionId });
+  };
+
+  const ensureSessionAccess = async ({
+    sessionId,
+    authUser,
+    allowMissing = true,
+    claimUnowned = true,
+  }) => {
+    const sessionDoc = await mateyChatSessionsStorage.findOne({ sessionId });
+
+    if (!sessionDoc) {
+      if (allowMissing) {
+        return { sessionDoc: null, claimed: false };
+      }
+      return { error: { status: 404, message: 'Session not found' } };
+    }
+
+    if (isSameOwner(sessionDoc, authUser)) {
+      return { sessionDoc, claimed: false };
+    }
+
+    if (claimUnowned && isUnownedSession(sessionDoc)) {
+      const claimedDoc = await claimLegacyUnownedSession(sessionId, authUser);
+      if (claimedDoc && isSameOwner(claimedDoc, authUser)) {
+        return { sessionDoc: claimedDoc, claimed: true };
+      }
+    }
+
+    return { error: { status: 403, message: 'Forbidden: session access denied' } };
   };
 
   const chatLimiter = createChatRateLimiter({
@@ -175,17 +252,28 @@ module.exports = ({
     await incrementSuggestedTools();
     return insertResult;
   };
-  router.post('/chat/session/init', async (req, res) => {
+  router.post('/chat/session/init', requireAuth, async (req, res) => {
     try {
       const {
         sessionId,
-        userId = null,
-        userEmail = null,
         userName = 'Anonymous',
       } = req.body || {};
+      const authUser = req.authUser;
+      const verifiedUserId = authUser?.userId || null;
+      const verifiedUserEmail = authUser?.userEmail || null;
 
       if (!sessionId || typeof sessionId !== 'string') {
         return res.status(400).json({ error: 'sessionId is required' });
+      }
+
+      const access = await ensureSessionAccess({
+        sessionId,
+        authUser,
+        allowMissing: true,
+        claimUnowned: true,
+      });
+      if (access.error) {
+        return res.status(access.error.status).json({ error: access.error.message });
       }
 
       const now = new Date();
@@ -204,8 +292,8 @@ module.exports = ({
           },
           $set: {
             updatedAt: now,
-            ...(userId ? { userId } : {}),
-            ...(userEmail ? { userEmail } : {}),
+            ...(verifiedUserId ? { userId: verifiedUserId } : {}),
+            ...(verifiedUserEmail ? { userEmail: verifiedUserEmail } : {}),
             ...(userName ? { userName } : {}),
           },
         },
@@ -219,12 +307,13 @@ module.exports = ({
     }
   });
 
-  router.post('/chat/messages', chatLimiter, async (req, res) => {
+  router.post('/chat/messages', requireAuth, chatLimiter, async (req, res) => {
     try {
+      const authUser = req.authUser;
+      const verifiedUserId = authUser?.userId || null;
+      const verifiedUserEmail = authUser?.userEmail || null;
       const {
         sessionId,
-        userId = null,
-        userEmail = null,
         userName = 'Anonymous',
         role,
         content,
@@ -237,6 +326,16 @@ module.exports = ({
 
       if (!sessionId || typeof sessionId !== 'string') {
         return res.status(400).json({ error: 'sessionId is required' });
+      }
+
+      const access = await ensureSessionAccess({
+        sessionId,
+        authUser,
+        allowMissing: true,
+        claimUnowned: true,
+      });
+      if (access.error) {
+        return res.status(access.error.status).json({ error: access.error.message });
       }
 
       const normalizedImages = normalizeArray(images);
@@ -264,8 +363,8 @@ module.exports = ({
 
       const messageDoc = {
         sessionId,
-        userId,
-        userEmail,
+        userId: verifiedUserId,
+        userEmail: verifiedUserEmail,
         role: normalizedRole,
         content: typeof content === 'string' ? content : '',
         images: normalizedImages,
@@ -285,8 +384,8 @@ module.exports = ({
         insertResult = await persistMessageAtomic({
           messageDoc,
           sessionDelta: {
-            userId,
-            userEmail,
+            userId: verifiedUserId,
+            userEmail: verifiedUserEmail,
             userName,
             titleCandidate,
           },
@@ -326,8 +425,8 @@ module.exports = ({
 
           await chatLogsStorage.insertOne({
             sessionId,
-            userId,
-            userEmail,
+            userId: verifiedUserId,
+            userEmail: verifiedUserEmail,
             userName,
             prompt: latestPrompt,
             mateyResponse: messageDoc.content,
@@ -347,7 +446,7 @@ module.exports = ({
               messageId: savedMessage._id.toString(),
               sessionId,
               userName,
-              userEmail,
+              userEmail: verifiedUserEmail,
               timestamp: now,
               messageText: messageDoc.content,
               userPrompt: latestPrompt,
@@ -366,8 +465,8 @@ module.exports = ({
           action: 'CREATE',
           resource: 'messages_job',
           resourceId: savedMessage._id.toString(),
-          userId: userId || userEmail || 'anonymous',
-          userEmail: userEmail || 'anonymous@toolmate.com',
+          userId: verifiedUserId || verifiedUserEmail || 'anonymous',
+          userEmail: verifiedUserEmail || 'anonymous@toolmate.com',
           role: 'user',
           newData: {
             sessionId,
@@ -390,11 +489,21 @@ module.exports = ({
     }
   });
 
-  router.get('/chat/messages', async (req, res) => {
+  router.get('/chat/messages', requireAuth, async (req, res) => {
     try {
       const { sessionId, cursor, limit = DEFAULT_PAGE_SIZE } = req.query;
       if (!sessionId || typeof sessionId !== 'string') {
         return res.status(400).json({ error: 'sessionId is required' });
+      }
+
+      const access = await ensureSessionAccess({
+        sessionId,
+        authUser: req.authUser,
+        allowMissing: true,
+        claimUnowned: true,
+      });
+      if (access.error) {
+        return res.status(access.error.status).json({ error: access.error.message });
       }
 
       const pageSize = Math.min(
@@ -437,24 +546,36 @@ module.exports = ({
     }
   });
 
-  router.get('/chat/sessions', async (req, res) => {
+  router.get('/chat/sessions', requireAuth, async (req, res) => {
     try {
-      const { userEmail, userId, sessionId, limit = 20 } = req.query;
+      const { sessionId, limit = 20 } = req.query;
+      const authUser = req.authUser;
+      const userId = authUser?.userId || null;
+      const userEmail = authUser?.userEmail || null;
       const pageSize = Math.min(Math.max(Number.parseInt(limit, 10) || 20, 1), 100);
 
       let query = { messageCount: { $gt: 0 } };
 
       if (sessionId) {
+        const access = await ensureSessionAccess({
+          sessionId,
+          authUser,
+          allowMissing: true,
+          claimUnowned: true,
+        });
+        if (access.error) {
+          return res.status(access.error.status).json({ error: access.error.message });
+        }
         query = { sessionId, messageCount: { $gt: 0 } };
       } else if (userId) {
         query = {
           messageCount: { $gt: 0 },
-          $or: [{ userId }, ...(userEmail ? [{ userEmail }] : [])],
+          $or: [{ userId }, ...(userEmail ? [{ userEmail: normalizeEmailValue(userEmail) }] : [])],
         };
       } else if (userEmail) {
-        query = { messageCount: { $gt: 0 }, userEmail };
+        query = { messageCount: { $gt: 0 }, userEmail: normalizeEmailValue(userEmail) };
       } else {
-        return res.status(400).json({ error: 'Provide sessionId or user identity' });
+        return res.status(401).json({ error: 'Unauthorized: user identity missing' });
       }
 
       const sessions = await mateyChatSessionsStorage
@@ -482,11 +603,21 @@ module.exports = ({
       return res.status(500).json({ error: 'Failed to fetch sessions' });
     }
   });
-  router.get('/chat/sessions/:sessionId/bootstrap', async (req, res) => {
+  router.get('/chat/sessions/:sessionId/bootstrap', requireAuth, async (req, res) => {
     try {
       const { sessionId } = req.params;
       if (!sessionId || typeof sessionId !== 'string') {
         return res.status(400).json({ error: 'sessionId is required' });
+      }
+
+      const access = await ensureSessionAccess({
+        sessionId,
+        authUser: req.authUser,
+        allowMissing: true,
+        claimUnowned: true,
+      });
+      if (access.error) {
+        return res.status(access.error.status).json({ error: access.error.message });
       }
 
       const pageSize = Math.min(
@@ -523,11 +654,21 @@ module.exports = ({
       return res.status(500).json({ error: 'Failed to bootstrap session' });
     }
   });
-  router.delete('/chat/sessions/:sessionId', async (req, res) => {
+  router.delete('/chat/sessions/:sessionId', requireAuth, async (req, res) => {
     try {
       const { sessionId } = req.params;
       if (!sessionId || typeof sessionId !== 'string') {
         return res.status(400).json({ error: 'sessionId is required' });
+      }
+
+      const access = await ensureSessionAccess({
+        sessionId,
+        authUser: req.authUser,
+        allowMissing: true,
+        claimUnowned: true,
+      });
+      if (access.error) {
+        return res.status(access.error.status).json({ error: access.error.message });
       }
 
       const now = new Date();
@@ -570,8 +711,8 @@ module.exports = ({
           action: 'DELETE',
           resource: 'messages_job_session',
           resourceId: sessionId,
-          userId: 'system',
-          userEmail: 'system@toolmate.com',
+          userId: req.authUser?.userId || req.authUser?.userEmail || 'system',
+          userEmail: req.authUser?.userEmail || 'system@toolmate.com',
           role: 'user',
           newData: { sessionId, deletedCount },
           ...getUserInfoFromRequest(req),
