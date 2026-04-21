@@ -2,6 +2,7 @@ const express = require('express');
 const { ObjectId } = require('mongodb');
 const { createChatRateLimiter } = require('./chat-rate-limit');
 const { createRequireAuth, normalizeEmail } = require('./auth-middleware');
+const { enrichUserWithSubscription } = require('./subscription-status');
 const CURSOR_DATA_SIZE = 30;
 const DEFAULT_PAGE_SIZE = CURSOR_DATA_SIZE;
 const MAX_PAGE_SIZE = 100;
@@ -28,6 +29,256 @@ const normalizeRole = (role) => {
 };
 
 const normalizeArray = (value) => (Array.isArray(value) ? value : []);
+const normalizeStringArray = (value) =>
+  normalizeArray(value)
+    .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+    .filter(Boolean);
+const normalizeToolText = (value) =>
+  (typeof value === 'string' ? value : '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const containsWholePhrase = (haystack, phrase) => {
+  if (!haystack || !phrase) return false;
+  const regex = new RegExp(`(^|\\s)${escapeRegex(phrase)}(\\s|$)`, 'i');
+  return regex.test(haystack);
+};
+const TOOL_TOKEN_STOPWORDS = new Set([
+  'set',
+  'kit',
+  'tool',
+  'tools',
+  'pack',
+  'piece',
+  'pieces',
+  'pc',
+  'pcs',
+  'with',
+  'and',
+  'for',
+]);
+const toMeaningfulTokens = (value) =>
+  normalizeToolText(value)
+    .split(' ')
+    .map((token) => token.trim())
+    .filter((token) => token.length > 2 && !TOOL_TOKEN_STOPWORDS.has(token));
+const STAGE_ORDER = ['planning', 'buying', 'building', 'finishing', 'done'];
+const STAGE_WEIGHT = STAGE_ORDER.reduce((acc, stage, index) => {
+  acc[stage] = index;
+  return acc;
+}, {});
+const DECISION_FIELD_LABELS = {
+  budgetTier: 'Budget tier',
+  materialChosen: 'Material chosen',
+  finishChosen: 'Finish chosen',
+  ownedToolsConfirmed: 'Owned tools confirmed',
+  measurementsConfirmed: 'Measurements confirmed',
+};
+
+const toToolName = (tool) => {
+  if (typeof tool === 'string') return tool.trim();
+  if (!tool || typeof tool !== 'object') return '';
+  const candidates = [
+    tool.name,
+    tool.display_name,
+    tool.product_name,
+    tool.tool_name,
+    tool.toolName,
+    tool.productName,
+    tool.title,
+    tool.label,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+  return '';
+};
+
+const extractToolNames = (tools) => {
+  const unique = new Map();
+  normalizeArray(tools).forEach((tool) => {
+    const name = toToolName(tool);
+    if (!name) return;
+    const key = name.toLowerCase();
+    if (!unique.has(key)) {
+      unique.set(key, name);
+    }
+  });
+  return Array.from(unique.values());
+};
+
+const buildSuggestedToolMetaMap = (tools) => {
+  const toolMap = new Map();
+  normalizeArray(tools).forEach((tool) => {
+    if (!tool || typeof tool !== 'object') return;
+    const name = toToolName(tool);
+    if (!name) return;
+    const key = name.toLowerCase();
+    if (!toolMap.has(key)) {
+      toolMap.set(key, tool);
+    }
+  });
+  return toolMap;
+};
+
+const isOptionalBySuggestionMeta = (tool) => {
+  if (!tool || typeof tool !== 'object') return false;
+  const isTruthy = (value) => value === true || value === 1 || value === '1' || value === 'true';
+  if (isTruthy(tool.isOptional) || isTruthy(tool.optional)) return true;
+  if (typeof tool.priority === 'string' && tool.priority.toLowerCase() === 'optional') return true;
+  // In ToolMate payloads, boosted items are prioritized enhancements.
+  if (isTruthy(tool.boosted)) return true;
+  return false;
+};
+
+const classifyToolName = (name) => {
+  const lowered = name.toLowerCase();
+  if (
+    /screw|nail|plug|adhesive|sealant|paint|sandpaper|blade|bit|caulk|glue|tape|primer|oil|battery/.test(
+      lowered,
+    )
+  ) {
+    return 'consumables';
+  }
+  if (/upgrade|premium|pro|advanced|optional/.test(lowered)) {
+    return 'optionalUpgrades';
+  }
+  return 'mustBuy';
+};
+
+const inferStageFromContent = (content, fallback = 'planning') => {
+  const lowered = (typeof content === 'string' ? content : '').toLowerCase();
+  if (/done|completed|finished all|project complete/.test(lowered)) return 'done';
+  if (/finish|paint|sand|seal|coat|final touch/.test(lowered)) return 'finishing';
+  if (/build|install|assemble|mount|cut|drill/.test(lowered)) return 'building';
+  if (/buy|purchase|shop|order|missing|need to get/.test(lowered)) return 'buying';
+  if (/plan|decide|measure|scope|design/.test(lowered)) return 'planning';
+  return STAGE_ORDER.includes(fallback) ? fallback : 'planning';
+};
+
+const extractDecisionLogEntries = (metadata, createdAt) => {
+  const entries = [];
+  if (!metadata || typeof metadata !== 'object') return entries;
+  Object.keys(DECISION_FIELD_LABELS).forEach((key) => {
+    if (metadata[key] === undefined || metadata[key] === null || metadata[key] === '') return;
+    entries.push({
+      key,
+      label: DECISION_FIELD_LABELS[key],
+      value: metadata[key],
+      decidedAt: createdAt,
+    });
+  });
+  return entries;
+};
+
+const mergeDecisionLog = (previous = [], incoming = []) => {
+  const merged = new Map();
+  normalizeArray(previous).forEach((entry) => {
+    if (!entry || typeof entry !== 'object' || !entry.key) return;
+    merged.set(entry.key, entry);
+  });
+  normalizeArray(incoming).forEach((entry) => {
+    if (!entry || typeof entry !== 'object' || !entry.key) return;
+    merged.set(entry.key, entry);
+  });
+  return Array.from(merged.values()).sort(
+    (a, b) => new Date(a.decidedAt || 0).getTime() - new Date(b.decidedAt || 0).getTime(),
+  );
+};
+
+const estimateSpendByBudgetTier = (tools, budgetHint) => {
+  const base = Math.max(normalizeArray(tools).length, 1);
+  const budgetBase = Number.isFinite(Number(budgetHint)) ? Number(budgetHint) : base * 60;
+  return {
+    low: Math.round(budgetBase * 0.8),
+    mid: Math.round(budgetBase),
+    high: Math.round(budgetBase * 1.35),
+  };
+};
+
+const buildDerivedJobState = ({
+  messageDoc,
+  previousJobState = {},
+  shedToolNames = [],
+}) => {
+  const previous = previousJobState && typeof previousJobState === 'object' ? previousJobState : {};
+  const previousStage = previous.stageTracker && typeof previous.stageTracker === 'object' ? previous.stageTracker : {};
+  const metadata = messageDoc.metadata && typeof messageDoc.metadata === 'object' ? messageDoc.metadata : {};
+  const suggestedToolNames = extractToolNames(messageDoc.suggestedTools);
+  const suggestedToolMetaMap = buildSuggestedToolMetaMap(messageDoc.suggestedTools);
+  const normalizedOwnedToolNames = normalizeStringArray(shedToolNames).map((name) => normalizeToolText(name));
+  const ownedTokenSets = normalizedOwnedToolNames.map((name) => new Set(toMeaningfulTokens(name)));
+  const isCoveredByShed = (suggestedName) => {
+    const normalizedSuggested = normalizeToolText(suggestedName);
+    if (!normalizedSuggested) return false;
+    const suggestedTokens = toMeaningfulTokens(normalizedSuggested);
+    return normalizedOwnedToolNames.some((ownedName, idx) => {
+      if (ownedName === normalizedSuggested) return true;
+      if (containsWholePhrase(normalizedSuggested, ownedName) || containsWholePhrase(ownedName, normalizedSuggested)) {
+        return true;
+      }
+
+      // Keyword overlap on meaningful tool words only.
+      const ownedTokenSet = ownedTokenSets[idx];
+      if (!ownedTokenSet || suggestedTokens.length === 0) return false;
+      return suggestedTokens.some((token) => ownedTokenSet.has(token));
+    });
+  };
+  const alreadyOwned = suggestedToolNames.filter((name) => isCoveredByShed(name));
+  const recommendationMissing = suggestedToolNames.filter((name) => !isCoveredByShed(name));
+  const optionalHelpful = suggestedToolNames.filter((name) => {
+    const toolMeta = suggestedToolMetaMap.get(name.toLowerCase());
+    if (isOptionalBySuggestionMeta(toolMeta)) return true;
+    return false;
+  });
+  const nonOptionalMissing = recommendationMissing.filter((name) => !optionalHelpful.includes(name));
+  const mustBuy = nonOptionalMissing.filter((name) => classifyToolName(name) === 'mustBuy');
+  const consumables = nonOptionalMissing.filter((name) => classifyToolName(name) === 'consumables');
+
+  const nextStage = metadata.currentStage || inferStageFromContent(messageDoc.content, previousStage.currentStage);
+  const previousWeight = STAGE_WEIGHT[previousStage.currentStage] ?? 0;
+  const nextWeight = STAGE_WEIGHT[nextStage] ?? 0;
+  const currentStage = nextWeight < previousWeight ? previousStage.currentStage : nextStage;
+  const decisionLog = mergeDecisionLog(previous.decisionLog, extractDecisionLogEntries(metadata, messageDoc.createdAt));
+
+  return {
+    stageTracker: {
+      currentStage,
+      currentBlocker:
+        metadata.currentBlocker ||
+        metadata.blocker ||
+        previousStage.currentBlocker ||
+        (mustBuy.length > 0 ? `Missing: ${mustBuy.slice(0, 3).join(', ')}` : 'None'),
+      nextDecision: metadata.nextDecision || previousStage.nextDecision || 'Confirm next material/tool choice',
+      lastRecommendation:
+        metadata.lastRecommendation ||
+        (typeof messageDoc.content === 'string' && messageDoc.content.trim().slice(0, 180)) ||
+        previousStage.lastRecommendation ||
+        '',
+    },
+    savedShoppingList: {
+      mustBuy,
+      alreadyOwned,
+      optionalUpgrades: optionalHelpful,
+      consumables,
+      estimatedSpendByBudgetTier: estimateSpendByBudgetTier(
+        normalizeArray(messageDoc.suggestedTools),
+        metadata.budget,
+      ),
+    },
+    missingItems: {
+      alreadyCovered: alreadyOwned,
+      missing: nonOptionalMissing,
+      optionalHelpful,
+    },
+    decisionLog,
+    updatedAt: messageDoc.createdAt,
+  };
+};
 
 const encodeCursor = (message) => {
   const payload = {
@@ -89,6 +340,7 @@ module.exports = ({
   mongoClient,
   messagesJobStorage,
   mateyChatSessionsStorage,
+  shedToolsStorage,
   usersStorage,
   chatLogsStorage,
   auditLogger,
@@ -223,6 +475,9 @@ module.exports = ({
       },
       $inc: sessionCountersInc,
     };
+    if (sessionDelta.jobState) {
+      sessionUpdate.$set.jobState = sessionDelta.jobState;
+    }
     if (incomingTitle) {
       await mateyChatSessionsStorage.updateOne(
         { sessionId, title: DEFAULT_TITLE },
@@ -360,6 +615,38 @@ module.exports = ({
       const normalizedSuggestedTools = normalizeArray(suggestedTools);
       const isToolSuggestion =
         normalizedMetadata.isToolSuggestion === true || normalizedSuggestedTools.length > 0;
+      const previousSessionDoc = await mateyChatSessionsStorage.findOne({ sessionId });
+      const previousJobState =
+        previousSessionDoc?.jobState && typeof previousSessionDoc.jobState === 'object'
+          ? previousSessionDoc.jobState
+          : {};
+      let derivedJobState = previousJobState;
+      if (isToolSuggestion) {
+        const shedRows = shedToolsStorage ?
+          await shedToolsStorage
+            .find({
+              user_id: verifiedUserId,
+              collection: { $ne: 'shed_analytics' },
+            })
+            .project({ tool_name: 1 })
+            .toArray()
+        : [];
+        const shedToolNames = shedRows.map((row) => row.tool_name).filter(Boolean);
+        derivedJobState = buildDerivedJobState({
+          messageDoc: {
+            content: typeof content === 'string' ? content : '',
+            suggestedTools: normalizedSuggestedTools,
+            metadata: normalizedMetadata,
+            createdAt: now,
+          },
+          previousJobState,
+          shedToolNames,
+        });
+      }
+      const mergedMetadata = {
+        ...normalizedMetadata,
+        ...(isToolSuggestion ? { jobState: derivedJobState } : {}),
+      };
 
       const messageDoc = {
         sessionId,
@@ -371,7 +658,7 @@ module.exports = ({
         suggestedTools: normalizedSuggestedTools,
         toolsUsed: normalizeArray(toolsUsed),
         isToolSuggestion,
-        metadata: normalizedMetadata,
+        metadata: mergedMetadata,
         clientMessageId,
         createdAt: now,
         updatedAt: now,
@@ -388,6 +675,7 @@ module.exports = ({
             userEmail: verifiedUserEmail,
             userName,
             titleCandidate,
+            ...(isToolSuggestion ? { jobState: derivedJobState } : {}),
           },
         });
       } catch (insertErr) {
@@ -592,6 +880,7 @@ module.exports = ({
           lastMessageAt: 1,
           userEmail: 1,
           userId: 1,
+          jobState: 1,
         })
         .sort({ lastMessageAt: -1, updatedAt: -1, createdAt: -1 })
         .limit(pageSize)
@@ -734,12 +1023,18 @@ module.exports = ({
 
   router.get('/admin/chat-sessions', async (req, res) => {
     try {
-      const { page = 1, limit = 20, search, lightweight = 'false' } = req.query;
+      const { page = 1, limit = 20, search, lightweight = 'false', activeWindowMinutes } = req.query;
       const pageNumber = Math.max(Number.parseInt(page, 10) || 1, 1);
       const limitNumber = Math.min(Math.max(Number.parseInt(limit, 10) || 20, 1), 100);
       const skip = (pageNumber - 1) * limitNumber;
 
       const query = { messageCount: { $gt: 0 } };
+      const activeWindow = Number.parseInt(activeWindowMinutes, 10);
+      if (Number.isFinite(activeWindow) && activeWindow > 0) {
+        const threshold = new Date();
+        threshold.setMinutes(threshold.getMinutes() - activeWindow);
+        query.lastMessageAt = { $gte: threshold };
+      }
       if (search && typeof search === 'string' && search.trim()) {
         query.$or = [
           { userName: { $regex: search.trim(), $options: 'i' } },
@@ -800,7 +1095,7 @@ module.exports = ({
             timestamp: sessionDoc.lastMessageAt || sessionDoc.updatedAt || sessionDoc.createdAt,
             flagTriggered: false,
             toolCount: 0,
-            userDetails: user || null,
+            userDetails: enrichUserWithSubscription(user),
           };
         }),
       );
@@ -816,6 +1111,55 @@ module.exports = ({
     } catch (error) {
       console.error('Error fetching admin chat sessions from messages-job:', error);
       return res.status(500).json({ error: 'Failed to fetch chat sessions' });
+    }
+  });
+
+  router.get('/admin/chat-sessions/:sessionId/messages', async (req, res) => {
+    try {
+      const { sessionId } = req.params;
+      const { cursor, limit = DEFAULT_PAGE_SIZE } = req.query;
+
+      if (!sessionId || typeof sessionId !== 'string') {
+        return res.status(400).json({ error: 'sessionId is required' });
+      }
+
+      const pageSize = Math.min(
+        Math.max(Number.parseInt(limit, 10) || DEFAULT_PAGE_SIZE, 1),
+        MAX_PAGE_SIZE,
+      );
+      const cursorValue = cursor ? decodeCursor(cursor) : null;
+
+      const query = { sessionId };
+      if (cursorValue) {
+        query.$or = [
+          { createdAt: { $lt: cursorValue.createdAt } },
+          { createdAt: cursorValue.createdAt, _id: { $lt: cursorValue.id } },
+        ];
+      }
+
+      const rows = await messagesJobStorage
+        .find(query)
+        .sort({ createdAt: -1, _id: -1 })
+        .limit(pageSize + 1)
+        .toArray();
+
+      const hasMore = rows.length > pageSize;
+      const sliced = hasMore ? rows.slice(0, pageSize) : rows;
+      const nextCursor = hasMore ? encodeCursor(sliced[sliced.length - 1]) : null;
+
+      return res.json({
+        success: true,
+        sessionId,
+        messages: sliced.reverse().map(toPublicMessage),
+        pagination: {
+          hasMore,
+          nextCursor,
+          limit: pageSize,
+        },
+      });
+    } catch (error) {
+      console.error('Error fetching admin session messages:', error);
+      return res.status(500).json({ error: 'Failed to fetch session messages' });
     }
   });
 
@@ -836,7 +1180,7 @@ module.exports = ({
 
       return res.json({
         ...sessionDoc,
-        userDetails: user || null,
+        userDetails: enrichUserWithSubscription(user),
       });
     } catch (error) {
       console.error('Error fetching admin chat session from messages-job:', error);
@@ -926,6 +1270,11 @@ module.exports = ({
               sessionId: 1,
               userId: 1,
               userEmail: 1,
+              content: 1,
+              images: 1,
+              suggestedTools: 1,
+              toolsUsed: 1,
+              isToolSuggestion: 1,
               metadata: 1,
               createdAt: 1,
               updatedAt: 1,
@@ -935,8 +1284,10 @@ module.exports = ({
               userId: 1,
               userEmail: 1,
               content: 1,
+              images: 1,
               suggestedTools: 1,
               toolsUsed: 1,
+              isToolSuggestion: 1,
               metadata: 1,
               createdAt: 1,
               updatedAt: 1,
@@ -983,9 +1334,13 @@ module.exports = ({
             userEmail,
             prompt: latestPromptDoc?.content || '',
             mateyResponse: typeof row.content === 'string' ? row.content : '',
+            images: Array.isArray(row.images) ? row.images : [],
+            suggestedTools: Array.isArray(row.suggestedTools) ? row.suggestedTools : [],
+            toolsUsed: Array.isArray(row.toolsUsed) ? row.toolsUsed : [],
+            isToolSuggestion: computeIsToolSuggestion(row),
             timestamp: row.createdAt,
             metadata: row.metadata && typeof row.metadata === 'object' ? row.metadata : {},
-            userDetails: user || null,
+            userDetails: enrichUserWithSubscription(user),
           };
         }),
       );
@@ -1042,9 +1397,13 @@ module.exports = ({
         userEmail,
         prompt: latestPromptDoc?.content || '',
         mateyResponse: typeof row.content === 'string' ? row.content : '',
+        images: Array.isArray(row.images) ? row.images : [],
+        suggestedTools: Array.isArray(row.suggestedTools) ? row.suggestedTools : [],
+        toolsUsed: Array.isArray(row.toolsUsed) ? row.toolsUsed : [],
+        isToolSuggestion: computeIsToolSuggestion(row),
         timestamp: row.createdAt,
         metadata: row.metadata && typeof row.metadata === 'object' ? row.metadata : {},
-        userDetails: user || null,
+        userDetails: enrichUserWithSubscription(user),
       });
     } catch (error) {
       console.error('Error fetching admin messages-job log details:', error);

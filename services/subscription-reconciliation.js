@@ -1,10 +1,7 @@
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-
 const SUBSCRIPTION_GRACE_DAYS = Number.parseInt(process.env.SUBSCRIPTION_GRACE_DAYS || '3', 10);
 const ONE_TIME_SUBSCRIPTION_DAYS = Number.parseInt(process.env.ONE_TIME_SUBSCRIPTION_DAYS || '30', 10);
 const ACTIVE_STATUSES = new Set(['active', 'trialing']);
-
-// Keep this in sync with the same set in subscription-routes.js.
 const TERMINAL_STATUSES = new Set([
   'canceled',
   'unpaid',
@@ -21,12 +18,12 @@ const derivePlanFromStatus = (status) => {
 };
 
 const normalizeSubscription = (user) => {
-  const legacyActive = Boolean(user?.isSubscribed);
   const subscription = user?.subscription || {};
+  const status = subscription.status || 'inactive';
 
   return {
-    status: subscription.status || (legacyActive ? 'active' : 'inactive'),
-    plan: subscription.plan || (legacyActive ? 'premium' : 'free'),
+    status,
+    plan: subscription.plan || (status === 'active' ? 'premium' : 'free'),
     billingMode: subscription.billingMode || 'auto_renew',
     stripeCustomerId: subscription.stripeCustomerId || null,
     stripeSubscriptionId: subscription.stripeSubscriptionId || null,
@@ -113,10 +110,6 @@ const reconcileSingleUser = async ({ usersStorage, subscriptionStorage, auditLog
       next.gracePeriodEndsAt = null;
     }
   }
-
-  // Has the user's grace window already elapsed? If so, we must refuse to re-open it
-  // later even if Stripe still reports `past_due` — otherwise the cron becomes a perpetual
-  // grace extender.
   let localGraceExpired = false;
   if (next.status === 'past_due' && next.gracePeriodEndsAt && now > new Date(next.gracePeriodEndsAt)) {
     next.status = 'inactive';
@@ -130,8 +123,6 @@ const reconcileSingleUser = async ({ usersStorage, subscriptionStorage, auditLog
       const stripeSub = await stripe.subscriptions.retrieve(next.stripeSubscriptionId);
       const stripeStatus = stripeSub.status || next.status;
       next.status = stripeStatus;
-      // Plan follows entitlement: terminal states drop to `free`, active/trialing/past_due
-      // stay `premium`. This is what keeps DB and UI in agreement with Stripe.
       next.plan = derivePlanFromStatus(next.status);
       next.billingMode = 'auto_renew';
       next.stripeCustomerId =
@@ -143,16 +134,8 @@ const reconcileSingleUser = async ({ usersStorage, subscriptionStorage, auditLog
         ? new Date(stripeSub.current_period_end * 1000)
         : next.currentPeriodEnd;
       next.cancelAtPeriodEnd = Boolean(stripeSub.cancel_at_period_end);
-      // Grace window is a one-shot runway:
-      //  - grant it only when transitioning INTO past_due from a non-past_due state,
-      //  - preserve the existing deadline on subsequent cron ticks,
-      //  - never re-open it after we've already locally expired it this run,
-      //  - clear it entirely for any non-past_due status.
       if (next.status === 'past_due') {
         if (localGraceExpired) {
-          // Stripe is still past_due but we've already consumed the grace window.
-          // Downgrade entitlement locally and let a future Stripe event (canceled/unpaid)
-          // sync the terminal state.
           next.status = 'inactive';
           next.plan = 'free';
           next.gracePeriodEndsAt = null;

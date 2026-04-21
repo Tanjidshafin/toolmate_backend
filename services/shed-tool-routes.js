@@ -83,6 +83,7 @@ module.exports = ({ shedToolsStorage, auditLogger, getUserInfoFromRequest }) => 
   router.delete("/shed/remove/:toolId", async (req, res) => {
     try {
       const { toolId } = req.params
+      const userId = req.query?.userId
       const userInfo = getUserInfoFromRequest(req)
 
       if (!ObjectId.isValid(toolId)) {
@@ -91,8 +92,15 @@ module.exports = ({ shedToolsStorage, auditLogger, getUserInfoFromRequest }) => 
           error: "Invalid tool ID format",
         })
       }
+      if (!userId || typeof userId !== "string") {
+        return res.status(400).json({
+          success: false,
+          error: "User ID is required",
+        })
+      }
       const toolDoc = await shedToolsStorage.findOne({
         _id: new ObjectId(toolId),
+        user_id: userId,
         collection: { $ne: "shed_analytics" },
       })
       if (!toolDoc) {
@@ -103,6 +111,7 @@ module.exports = ({ shedToolsStorage, auditLogger, getUserInfoFromRequest }) => 
       }
       const result = await shedToolsStorage.deleteOne({
         _id: new ObjectId(toolId),
+        user_id: userId,
         collection: { $ne: "shed_analytics" },
       })
       if (result.deletedCount === 0) {

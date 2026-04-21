@@ -1,7 +1,25 @@
 const express = require("express")
 const { ObjectId } = require("mongodb")
-module.exports = ({ flaggedMessagesStorage, toolsStorage, sessionsStorage, usersStorage }) => {
+
+module.exports = ({
+  flaggedMessagesStorage,
+  toolsStorage,
+  usersStorage,
+  redirectTrackingStorage,
+  mateyChatSessionsStorage,
+  messagesJobStorage,
+}) => {
   const router = express.Router()
+  const hasActiveSubscriptionStatus = (user) => {
+    const status = typeof user?.subscription?.status === "string" ? user.subscription.status.trim().toLowerCase() : ""
+    return status === "active"
+  }
+
+  const toObjectIdIfValid = (value) => {
+    if (!value || typeof value !== "string" || !ObjectId.isValid(value)) return null
+    return new ObjectId(value)
+  }
+
   router.get("/admin/analytics", async (req, res) => {
     try {
       const { period = "7d" } = req.query
@@ -20,24 +38,55 @@ module.exports = ({ flaggedMessagesStorage, toolsStorage, sessionsStorage, users
         default:
           startDate.setDate(startDate.getDate() - 7)
       }
-      const mostFlaggedTools = await flaggedMessagesStorage
-        .aggregate([
-          { $match: { flaggedAt: { $gte: startDate } } },
-          {
-            $lookup: {
-              from: "Sessions",
-              localField: "messageId",
-              foreignField: "messages.id",
-              as: "session",
-            },
-          },
-          { $unwind: { path: "$session", preserveNullAndEmptyArrays: true } },
-          { $unwind: { path: "$session.suggestedTools", preserveNullAndEmptyArrays: true } },
-          { $group: { _id: "$session.suggestedTools.name", flagCount: { $sum: 1 } } },
-          { $sort: { flagCount: -1 } },
-          { $limit: 10 },
-        ])
+
+      const flaggedMessages = await flaggedMessagesStorage
+        .find({ flaggedAt: { $gte: startDate } }, { projection: { messageId: 1 } })
         .toArray()
+
+      const flaggedMessageObjectIds = flaggedMessages
+        .map((flagged) => toObjectIdIfValid(flagged.messageId))
+        .filter(Boolean)
+      const flaggedClientMessageIds = flaggedMessages
+        .map((flagged) => (typeof flagged.messageId === "string" ? flagged.messageId.trim() : ""))
+        .filter(Boolean)
+
+      const flaggedToolRows =
+        flaggedMessageObjectIds.length > 0 || flaggedClientMessageIds.length > 0
+          ? await messagesJobStorage
+              .find(
+                {
+                  role: "matey",
+                  $or: [
+                    ...(flaggedMessageObjectIds.length > 0 ? [{ _id: { $in: flaggedMessageObjectIds } }] : []),
+                    ...(flaggedClientMessageIds.length > 0
+                      ? [{ clientMessageId: { $in: flaggedClientMessageIds } }]
+                      : []),
+                  ],
+                },
+                { projection: { suggestedTools: 1 } },
+              )
+              .toArray()
+          : []
+
+      const flaggedToolCounts = new Map()
+      flaggedToolRows.forEach((row) => {
+        const suggestedTools = Array.isArray(row.suggestedTools) ? row.suggestedTools : []
+        suggestedTools.forEach((tool) => {
+          const name =
+            (typeof tool?.name === "string" && tool.name.trim()) ||
+            (typeof tool?.display_name === "string" && tool.display_name.trim()) ||
+            (typeof tool?.product_name === "string" && tool.product_name.trim()) ||
+            null
+          if (!name) return
+          flaggedToolCounts.set(name, (flaggedToolCounts.get(name) || 0) + 1)
+        })
+      })
+
+      const mostFlaggedTools = Array.from(flaggedToolCounts.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 10)
+        .map(([toolName, flagCount]) => ({ _id: toolName, flagCount }))
+
       const flagsByReason = await flaggedMessagesStorage
         .aggregate([
           { $match: { flaggedAt: { $gte: startDate } } },
@@ -46,6 +95,7 @@ module.exports = ({ flaggedMessagesStorage, toolsStorage, sessionsStorage, users
           { $sort: { count: -1 } },
         ])
         .toArray()
+
       const allToolsWithFlags = await flaggedMessagesStorage.distinct("messageId")
       const toolsWithNoFlags = await toolsStorage
         .aggregate([
@@ -54,11 +104,17 @@ module.exports = ({ flaggedMessagesStorage, toolsStorage, sessionsStorage, users
           { $group: { _id: "$suggestedTools.products.name", count: { $sum: 1 } } },
         ])
         .toArray()
-      const totalSessions = await sessionsStorage.countDocuments({ timestamp: { $gte: startDate } })
+
+      const totalSessions = await mateyChatSessionsStorage.countDocuments({
+        messageCount: { $gt: 0 },
+        lastMessageAt: { $gte: startDate },
+      })
       const totalFlags = await flaggedMessagesStorage.countDocuments({ flaggedAt: { $gte: startDate } })
-      const totalRedirects = await sessionsStorage.countDocuments({ timestamp: { $gte: startDate } })
-      const totalUsers = await usersStorage.countDocuments({ createdAt: { $gte: startDate } })
-      const subscribedUsers = await usersStorage.countDocuments({ isSubscribed: true, createdAt: { $gte: startDate } })
+      const totalRedirects = await redirectTrackingStorage.countDocuments({ timestamp: { $gte: startDate } })
+      const users = await usersStorage.find({ createdAt: { $gte: startDate } }).toArray()
+      const totalUsers = users.length
+      const subscribedUsers = users.filter(hasActiveSubscriptionStatus).length
+
       res.json({
         period,
         dateRange: { start: startDate, end: now },

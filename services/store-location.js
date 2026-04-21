@@ -1,5 +1,6 @@
 const express = require('express');
 const { ObjectId } = require('mongodb');
+const { getAdminActorFromRequest } = require('./admin-actor');
 
 module.exports = ({ storeLocationStorage, auditLogger, getUserInfoFromRequest, toolAnalyticsStorage }) => {
   const router = express.Router();
@@ -97,6 +98,7 @@ module.exports = ({ storeLocationStorage, auditLogger, getUserInfoFromRequest, t
   });
   router.post('/admin/store-locations', async (req, res) => {
     try {
+      const actor = getAdminActorFromRequest(req);
       const {
         store_id,
         store_name,
@@ -143,9 +145,9 @@ module.exports = ({ storeLocationStorage, auditLogger, getUserInfoFromRequest, t
         action: 'CREATE',
         resource: 'store_location',
         resourceId: result.insertedId.toString(),
-        userId: updatedBy,
-        userEmail: 'admin@toolmate.com',
-        role: 'admin',
+        userId: updatedBy || actor.userId,
+        userEmail: actor.userEmail,
+        role: actor.role,
         newData: newStoreLocation,
         metadata: {
           store_id,
@@ -168,6 +170,7 @@ module.exports = ({ storeLocationStorage, auditLogger, getUserInfoFromRequest, t
   });
   router.put('/admin/store-locations/:id', async (req, res) => {
     try {
+      const actor = getAdminActorFromRequest(req);
       const { id } = req.params;
       const {
         store_id,
@@ -211,9 +214,9 @@ module.exports = ({ storeLocationStorage, auditLogger, getUserInfoFromRequest, t
         action: 'UPDATE',
         resource: 'store_location',
         resourceId: existingStore._id.toString(),
-        userId: updatedBy,
-        userEmail: 'admin@toolmate.com',
-        role: 'admin',
+        userId: updatedBy || actor.userId,
+        userEmail: actor.userEmail,
+        role: actor.role,
         oldData: existingStore,
         newData: updateData,
         metadata: {
@@ -234,6 +237,7 @@ module.exports = ({ storeLocationStorage, auditLogger, getUserInfoFromRequest, t
   });
   router.delete('/admin/store-locations/:id', async (req, res) => {
     try {
+      const actor = getAdminActorFromRequest(req);
       const { id } = req.params;
       const { updatedBy = 'admin' } = req.body;
 
@@ -254,9 +258,9 @@ module.exports = ({ storeLocationStorage, auditLogger, getUserInfoFromRequest, t
         action: 'DELETE',
         resource: 'store_location',
         resourceId: existingStore._id.toString(),
-        userId: updatedBy,
-        userEmail: 'admin@toolmate.com',
-        role: 'admin',
+        userId: updatedBy || actor.userId,
+        userEmail: actor.userEmail,
+        role: actor.role,
         oldData: existingStore,
         metadata: {
           store_id: existingStore.store_id,

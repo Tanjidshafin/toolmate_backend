@@ -2,6 +2,8 @@ const sgMail = require('@sendgrid/mail');
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
 const FROM_EMAIL = process.env.FROM_EMAIL || 'noreply@toolmate.com';
 const FROM_NAME = process.env.FROM_NAME || 'Toolmate';
+const EMAIL_PROVIDER = 'sendgrid';
+
 class EmailService {
   constructor(emailLogsStorage) {
     this.emailLogsStorage = emailLogsStorage;
@@ -13,22 +15,253 @@ class EmailService {
       sgMail.setApiKey(SENDGRID_API_KEY);
     }
   }
+
+  getConfigurationValidation() {
+    const missing = [];
+
+    if (!SENDGRID_API_KEY) missing.push('SENDGRID_API_KEY');
+    if (!FROM_EMAIL) missing.push('FROM_EMAIL');
+    if (!FROM_NAME) missing.push('FROM_NAME');
+
+    if (missing.length === 0) {
+      return { valid: true };
+    }
+
+    return {
+      valid: false,
+      failureCategory: 'invalid_configuration',
+      technicalMessage: `Missing required email configuration: ${missing.join(', ')}`,
+      userMessage: 'Email delivery is unavailable because the email provider is not configured correctly.',
+      retryable: false,
+      statusCode: 500,
+    };
+  }
+
+  normalizeEmailError(error) {
+    const sendgridErrors = Array.isArray(error?.response?.body?.errors) ? error.response.body.errors : [];
+    const sendgridMessage = sendgridErrors
+      .map((entry) => [entry?.message, entry?.field ? `field: ${entry.field}` : null, entry?.help].filter(Boolean).join(' | '))
+      .filter(Boolean)
+      .join(' ; ');
+    const technicalMessage = sendgridMessage || error?.message || 'Unknown email delivery error';
+    const statusCode = error?.code || error?.response?.statusCode || error?.response?.status || null;
+    const lowerMessage = technicalMessage.toLowerCase();
+
+    let failureCategory = 'unknown_error';
+    let retryable = false;
+
+    if (!SENDGRID_API_KEY || lowerMessage.includes('api key') || lowerMessage.includes('sender identity')) {
+      failureCategory = 'invalid_configuration';
+    } else if (
+      lowerMessage.includes('invalid') ||
+      lowerMessage.includes('bad request') ||
+      lowerMessage.includes('recipient') ||
+      lowerMessage.includes('email address')
+    ) {
+      failureCategory = 'validation_error';
+    } else if (
+      lowerMessage.includes('timeout') ||
+      lowerMessage.includes('network') ||
+      lowerMessage.includes('econnreset') ||
+      lowerMessage.includes('enotfound') ||
+      lowerMessage.includes('dns')
+    ) {
+      failureCategory = 'network_error';
+      retryable = true;
+    } else if (
+      Number(statusCode) >= 500 ||
+      lowerMessage.includes('temporarily unavailable') ||
+      lowerMessage.includes('rate limit')
+    ) {
+      failureCategory = 'provider_error';
+      retryable = true;
+    } else if (Number(statusCode) >= 400) {
+      failureCategory = 'provider_error';
+    }
+
+    return {
+      failureCategory,
+      technicalMessage,
+      userMessage:
+        failureCategory === 'invalid_configuration' ?
+          'The email service is not configured correctly right now.'
+        : failureCategory === 'validation_error' ?
+          'The email could not be sent because some of the email details were invalid.'
+        : failureCategory === 'network_error' ?
+          'The email could not be sent because the provider could not be reached.'
+        : 'The email provider rejected or failed the request.',
+      retryable,
+      statusCode,
+      providerError: sendgridErrors,
+    };
+  }
+
   async logEmail(emailData) {
     try {
       const logEntry = {
         ...emailData,
         timestamp: new Date(),
       };
-      await this.emailLogsStorage.insertOne(logEntry);
+      const result = await this.emailLogsStorage.insertOne(logEntry);
+      return { ...logEntry, _id: result.insertedId };
     } catch (error) {
       console.error('❌ Failed to log email:', error);
+      return null;
+    }
+  }
+
+  async deliverEmail({
+    msg,
+    emailType,
+    subType = null,
+    recipient,
+    recipientName,
+    subject,
+    message = null,
+    metadata = {},
+    triggerSource = null,
+    resourceType = null,
+    resourceId = null,
+    requestedBy = null,
+    attemptNumber = 1,
+    resentFromLogId = null,
+  }) {
+    const configValidation = this.getConfigurationValidation();
+    if (!configValidation.valid) {
+      const failedLog = await this.logEmail({
+        emailType,
+        type: emailType,
+        subType,
+        recipient,
+        recipientName,
+        subject,
+        content: msg?.html || null,
+        message,
+        metadata,
+        provider: EMAIL_PROVIDER,
+        providerMessageId: null,
+        status: 'failed',
+        success: false,
+        failureCategory: configValidation.failureCategory,
+        technicalMessage: configValidation.technicalMessage,
+        userMessage: configValidation.userMessage,
+        statusCode: configValidation.statusCode,
+        retryable: configValidation.retryable,
+        error: configValidation.technicalMessage,
+        triggerSource,
+        resourceType,
+        resourceId,
+        requestedBy,
+        attemptNumber,
+        resentFromLogId,
+      });
+
+      return {
+        success: false,
+        provider: EMAIL_PROVIDER,
+        messageId: null,
+        providerMessageId: null,
+        failureCategory: configValidation.failureCategory,
+        technicalMessage: configValidation.technicalMessage,
+        userMessage: configValidation.userMessage,
+        statusCode: configValidation.statusCode,
+        retryable: configValidation.retryable,
+        logId: failedLog?._id?.toString?.() || null,
+      };
+    }
+
+    try {
+      const response = await sgMail.send(msg);
+      const providerMessageId = response?.[0]?.headers?.['x-message-id'] || response?.[0]?.headers?.['X-Message-Id'] || null;
+      const loggedEmail = await this.logEmail({
+        emailType,
+        type: emailType,
+        subType,
+        recipient,
+        recipientName,
+        subject,
+        content: msg?.html || null,
+        message,
+        metadata,
+        provider: EMAIL_PROVIDER,
+        providerMessageId,
+        sendgridResponse: response?.[0] || null,
+        status: 'sent',
+        success: true,
+        failureCategory: null,
+        technicalMessage: null,
+        userMessage: 'Email sent successfully.',
+        statusCode: response?.[0]?.statusCode || 202,
+        retryable: false,
+        triggerSource,
+        resourceType,
+        resourceId,
+        requestedBy,
+        attemptNumber,
+        resentFromLogId,
+      });
+
+      return {
+        success: true,
+        provider: EMAIL_PROVIDER,
+        messageId: providerMessageId,
+        providerMessageId,
+        failureCategory: null,
+        technicalMessage: null,
+        userMessage: 'Email sent successfully.',
+        statusCode: response?.[0]?.statusCode || 202,
+        retryable: false,
+        logId: loggedEmail?._id?.toString?.() || null,
+      };
+    } catch (error) {
+      const normalizedError = this.normalizeEmailError(error);
+      const failedLog = await this.logEmail({
+        emailType,
+        type: emailType,
+        subType,
+        recipient,
+        recipientName,
+        subject,
+        content: msg?.html || null,
+        message,
+        metadata,
+        provider: EMAIL_PROVIDER,
+        providerMessageId: null,
+        status: 'failed',
+        success: false,
+        failureCategory: normalizedError.failureCategory,
+        technicalMessage: normalizedError.technicalMessage,
+        userMessage: normalizedError.userMessage,
+        statusCode: normalizedError.statusCode,
+        retryable: normalizedError.retryable,
+        error: normalizedError.technicalMessage,
+        errorCode: error?.code || normalizedError.statusCode || null,
+        providerError: normalizedError.providerError,
+        triggerSource,
+        resourceType,
+        resourceId,
+        requestedBy,
+        attemptNumber,
+        resentFromLogId,
+      });
+
+      console.error(`❌ Failed to send ${emailType} email:`, normalizedError.technicalMessage);
+
+      return {
+        success: false,
+        provider: EMAIL_PROVIDER,
+        messageId: null,
+        providerMessageId: null,
+        failureCategory: normalizedError.failureCategory,
+        technicalMessage: normalizedError.technicalMessage,
+        userMessage: normalizedError.userMessage,
+        statusCode: normalizedError.statusCode,
+        retryable: normalizedError.retryable,
+        logId: failedLog?._id?.toString?.() || null,
+      };
     }
   }
   async sendWelcomeEmail(userEmail, userName) {
-    try {
-      if (!SENDGRID_API_KEY) {
-        throw new Error('SendGrid API key missing');
-      }
       const msg = {
         to: userEmail,
         from: {
@@ -170,37 +403,15 @@ class EmailService {
 </div>
         `,
       };
-      const response = await sgMail.send(msg);
-      await this.logEmail({
-        content: msg.html,
-        type: 'welcome',
+      return this.deliverEmail({
+        msg,
+        emailType: 'welcome',
         recipient: userEmail,
         recipientName: userName,
         subject: msg.subject,
-        sendgridResponse: response[0],
-        success: true,
       });
-      return { success: true, response: response[0] };
-    } catch (error) {
-      console.error('❌ Failed to send welcome email:', error);
-      await this.logEmail({
-        content: msg.html,
-        type: 'welcome',
-        recipient: userEmail,
-        recipientName: userName,
-        subject: 'Welcome to Toolmate!',
-        error: error.message,
-        errorCode: error.code,
-        success: false,
-      });
-      return { success: false, error: error.message };
-    }
   }
   async sendPasswordResetSuccessEmail(userEmail, userName) {
-    try {
-      if (!SENDGRID_API_KEY) {
-        throw new Error('SendGrid API key missing');
-      }
       const msg = {
         to: userEmail,
         from: {
@@ -322,32 +533,13 @@ class EmailService {
 </div>
         `,
       };
-      const response = await sgMail.send(msg);
-      await this.logEmail({
-        content: msg.html,
-        type: 'password_reset_success',
+      return this.deliverEmail({
+        msg,
+        emailType: 'password_reset_success',
         recipient: userEmail,
         recipientName: userName,
         subject: msg.subject,
-        sendgridResponse: response[0],
-        success: true,
       });
-      console.log('✅ Password reset email sent to:', userEmail);
-      return { success: true, response: response[0] };
-    } catch (error) {
-      console.error('❌ Failed to send password reset email:', error);
-      await this.logEmail({
-        content: msg.html,
-        type: 'password_reset_success',
-        recipient: userEmail,
-        recipientName: userName,
-        subject: 'Password Reset Successful',
-        error: error.message,
-        errorCode: error.code,
-        success: false,
-      });
-      return { success: false, error: error.message };
-    }
   }
   async sendAccountBannedEmail(userEmail, userName) {
     const message = `Hi ${userName},\n\nYour account has been temporarily suspended due to a violation of our terms of service.\n\nIf you believe this is an error, please contact support at help@toolmate.com with your account details.\n\nBest regards,\nThe Toolmate Team`;
@@ -360,10 +552,6 @@ class EmailService {
 
   async sendSystemAlertEmail(userEmail, userName, alertType, message) {
     console.log('📧 Sending system alert email:', alertType, 'to:', userEmail);
-    try {
-      if (!SENDGRID_API_KEY) {
-        throw new Error('SendGrid API key missing');
-      }
       const subjectMap = {
         account_banned: 'Account Suspended',
         account_unbanned: 'Account Reactivated',
@@ -513,44 +701,18 @@ class EmailService {
 </div>
         `,
       };
-      const response = await sgMail.send(msg);
-      await this.logEmail({
-        content: msg.html,
-        type: 'system_alert',
+      return this.deliverEmail({
+        msg,
+        emailType: 'system_alert',
         subType: alertType,
         recipient: userEmail,
         recipientName: userName,
-        subject: subject,
-        message: message,
-        sendgridResponse: response[0],
-        success: true,
+        subject,
+        message,
       });
-      return { success: true, response: response[0] };
-    } catch (error) {
-      console.error('❌ Failed to send system alert email:', error);
-
-      await this.logEmail({
-        content: msg.html,
-        type: 'system_alert',
-        subType: alertType,
-        recipient: userEmail,
-        recipientName: userName,
-        subject: `Account Update: ${alertType.replace('_', ' ')}`,
-        message: message,
-        error: error.message,
-        errorCode: error.code,
-        success: false,
-      });
-      return { success: false, error: error.message };
-    }
   }
 
   async sendNameChangedEmail(userEmail, userName, oldName, newName) {
-    try {
-      if (!SENDGRID_API_KEY) {
-        throw new Error('SendGrid API key missing');
-      }
-
       const msg = {
         to: userEmail,
         from: {
@@ -659,40 +821,17 @@ class EmailService {
         `,
       };
 
-      const response = await sgMail.send(msg);
-      await this.logEmail({
-        content: msg.html,
-        type: 'name_changed',
+      return this.deliverEmail({
+        msg,
+        emailType: 'name_changed',
         recipient: userEmail,
         recipientName: userName,
         subject: msg.subject,
         metadata: { oldName, newName },
-        sendgridResponse: response[0],
-        success: true,
       });
-
-      console.log('✅ Name changed email sent to:', userEmail);
-      return { success: true, response: response[0] };
-    } catch (error) {
-      console.error('❌ Failed to send name changed email:', error);
-      await this.logEmail({
-        content: msg.html,
-        type: 'name_changed',
-        recipient: userEmail,
-        recipientName: userName,
-        subject: 'Profile Name Updated Successfully',
-        error: error.message,
-        success: false,
-      });
-      return { success: false, error: error.message };
-    }
   }
 
   async sendEmailChangedEmail(userEmail, userName, oldEmail, newEmail) {
-    try {
-      if (!SENDGRID_API_KEY) {
-        throw new Error('SendGrid API key missing');
-      }
       const msg = {
         to: newEmail,
         from: {
@@ -732,40 +871,17 @@ class EmailService {
         `,
       };
 
-      const response = await sgMail.send(msg);
-      await this.logEmail({
-        content: msg.html,
-        type: 'email_changed',
+      return this.deliverEmail({
+        msg,
+        emailType: 'email_changed',
         recipient: newEmail,
         recipientName: userName,
         subject: msg.subject,
         metadata: { oldEmail, newEmail },
-        sendgridResponse: response[0],
-        success: true,
       });
-
-      console.log('✅ Email changed notification sent to:', newEmail);
-      return { success: true, response: response[0] };
-    } catch (error) {
-      console.error('❌ Failed to send email changed notification:', error);
-      await this.logEmail({
-        content: msg.html,
-        type: 'email_changed',
-        recipient: newEmail,
-        recipientName: userName,
-        subject: 'Email Address Updated Successfully',
-        error: error.message,
-        success: false,
-      });
-      return { success: false, error: error.message };
-    }
   }
 
   async sendPasswordChangedEmail(userEmail, userName) {
-    try {
-      if (!SENDGRID_API_KEY) {
-        throw new Error('SendGrid API key missing');
-      }
       const msg = {
         to: userEmail,
         from: {
@@ -805,39 +921,16 @@ class EmailService {
         `,
       };
 
-      const response = await sgMail.send(msg);
-      await this.logEmail({
-        content: msg.html,
-        type: 'password_changed',
+      return this.deliverEmail({
+        msg,
+        emailType: 'password_changed',
         recipient: userEmail,
         recipientName: userName,
         subject: msg.subject,
-        sendgridResponse: response[0],
-        success: true,
       });
-
-      console.log('✅ Password changed email sent to:', userEmail);
-      return { success: true, response: response[0] };
-    } catch (error) {
-      console.error('❌ Failed to send password changed email:', error);
-      await this.logEmail({
-        content: msg.html,
-        type: 'password_changed',
-        recipient: userEmail,
-        recipientName: userName,
-        subject: 'Password Changed Successfully',
-        error: error.message,
-        success: false,
-      });
-      return { success: false, error: error.message };
-    }
   }
 
   async sendUserBannedEmail(userEmail, userName, reason = null) {
-    try {
-      if (!SENDGRID_API_KEY) {
-        throw new Error('SendGrid API key missing');
-      }
       const msg = {
         to: userEmail,
         from: {
@@ -943,41 +1036,17 @@ class EmailService {
         `,
       };
 
-      const response = await sgMail.send(msg);
-      await this.logEmail({
-        content: msg.html,
-        type: 'user_banned',
+      return this.deliverEmail({
+        msg,
+        emailType: 'user_banned',
         recipient: userEmail,
         recipientName: userName,
         subject: msg.subject,
         metadata: { reason },
-        sendgridResponse: response[0],
-        success: true,
       });
-
-      console.log('✅ User banned email sent to:', userEmail);
-      return { success: true, response: response[0] };
-    } catch (error) {
-      console.error('❌ Failed to send user banned email:', error);
-      await this.logEmail({
-        content: msg.html,
-        type: 'user_banned',
-        recipient: userEmail,
-        recipientName: userName,
-        subject: 'Account Suspended - Action Required',
-        error: error.message,
-        success: false,
-      });
-      return { success: false, error: error.message };
-    }
   }
 
   async sendUserUnbannedEmail(userEmail, userName) {
-    try {
-      if (!SENDGRID_API_KEY) {
-        throw new Error('SendGrid API key missing');
-      }
-
       const msg = {
         to: userEmail,
         from: {
@@ -1076,40 +1145,16 @@ class EmailService {
         `,
       };
 
-      const response = await sgMail.send(msg);
-      await this.logEmail({
-        content: msg.html,
-        type: 'user_unbanned',
+      return this.deliverEmail({
+        msg,
+        emailType: 'user_unbanned',
         recipient: userEmail,
         recipientName: userName,
         subject: msg.subject,
-        sendgridResponse: response[0],
-        success: true,
       });
-
-      console.log('✅ User unbanned email sent to:', userEmail);
-      return { success: true, response: response[0] };
-    } catch (error) {
-      console.error('❌ Failed to send user unbanned email:', error);
-      await this.logEmail({
-        content: msg.html,
-        type: 'user_unbanned',
-        recipient: userEmail,
-        recipientName: userName,
-        subject: 'Welcome Back! Account Reactivated',
-        error: error.message,
-        success: false,
-      });
-      return { success: false, error: error.message };
-    }
   }
 
   async sendRoleChangedEmail(userEmail, userName, oldRole, newRole) {
-    try {
-      if (!SENDGRID_API_KEY) {
-        throw new Error('SendGrid API key missing');
-      }
-
       const msg = {
         to: userEmail,
         from: {
@@ -1229,41 +1274,17 @@ class EmailService {
         `,
       };
 
-      const response = await sgMail.send(msg);
-      await this.logEmail({
-        content: msg.html,
-        type: 'role_changed',
+      return this.deliverEmail({
+        msg,
+        emailType: 'role_changed',
         recipient: userEmail,
         recipientName: userName,
         subject: msg.subject,
         metadata: { oldRole, newRole },
-        sendgridResponse: response[0],
-        success: true,
       });
-
-      console.log('✅ Role changed email sent to:', userEmail);
-      return { success: true, response: response[0] };
-    } catch (error) {
-      console.error('❌ Failed to send role changed email:', error);
-      await this.logEmail({
-        content: msg.html,
-        type: 'role_changed',
-        recipient: userEmail,
-        recipientName: userName,
-        subject: 'Account Role Updated',
-        error: error.message,
-        success: false,
-      });
-      return { success: false, error: error.message };
-    }
   }
 
   async sendSubscriptionGiftedEmail(userEmail, userName, giftedBy = 'Toolmate') {
-    try {
-      if (!SENDGRID_API_KEY) {
-        throw new Error('SendGrid API key missing');
-      }
-
       const msg = {
         to: userEmail,
         from: {
@@ -1397,33 +1418,14 @@ class EmailService {
         `,
       };
 
-      const response = await sgMail.send(msg);
-      await this.logEmail({
-        content: msg.html,
-        type: 'subscription_gifted',
+      return this.deliverEmail({
+        msg,
+        emailType: 'subscription_gifted',
         recipient: userEmail,
         recipientName: userName,
         subject: msg.subject,
         metadata: { giftedBy },
-        sendgridResponse: response[0],
-        success: true,
       });
-
-      console.log('✅ Subscription gifted email sent to:', userEmail);
-      return { success: true, response: response[0] };
-    } catch (error) {
-      console.error('❌ Failed to send subscription gifted email:', error);
-      await this.logEmail({
-        content: msg.html,
-        type: 'subscription_gifted',
-        recipient: userEmail,
-        recipientName: userName,
-        subject: '🎁 Surprise! Premium Subscription Gifted to You',
-        error: error.message,
-        success: false,
-      });
-      return { success: false, error: error.message };
-    }
   }
 }
 

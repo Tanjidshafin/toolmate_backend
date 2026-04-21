@@ -2,10 +2,10 @@ class EmailTriggers {
   constructor(emailService) {
     this.emailService = emailService
   }
-  async triggerWelcomeEmail(userData) {
+  async triggerWelcomeEmail(userData, options = {}) {
     try {
       if (userData.userEmail && userData.userName) {
-        const result = await this.emailService.sendWelcomeEmail(userData.userEmail, userData.userName)
+        const result = await this.emailService.sendWelcomeEmail(userData.userEmail, userData.userName, options)
         return result
       } else {
         console.warn("⚠️ Missing email or name for welcome email:", userData)

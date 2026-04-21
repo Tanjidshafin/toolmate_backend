@@ -1,5 +1,6 @@
 const express = require('express');
 const { ObjectId } = require('mongodb');
+const { getAdminActorFromRequest } = require('./admin-actor');
 module.exports = ({
   ragSystemStorage,
   shedToolsStorage,
@@ -59,6 +60,7 @@ module.exports = ({
 
   router.put('/admin/rag-system/tool/:id/visibility', async (req, res) => {
     try {
+      const actor = getAdminActorFromRequest(req);
       const { id } = req.params;
       const { hidden, suppressed, updatedBy } = req.body;
       const userInfo = getUserInfoFromRequest(req);
@@ -86,9 +88,9 @@ module.exports = ({
         action: 'UPDATE',
         resource: 'rag_tool_visibility',
         resourceId: id,
-        userId: updatedBy || 'admin',
-        userEmail: 'admin@toolmate.com',
-        role: 'admin',
+        userId: updatedBy || actor.userId,
+        userEmail: actor.userEmail,
+        role: actor.role,
         oldData: existingTool,
         newData: { hidden, suppressed, updatedAt: new Date(), updatedBy: updatedBy || 'admin' },
         metadata: {
@@ -106,6 +108,7 @@ module.exports = ({
   });
   router.put('/admin/rag-system/tool/:id/boost', async (req, res) => {
     try {
+      const actor = getAdminActorFromRequest(req);
       const { id } = req.params;
       const { boosted, duration, promoExpiry, updatedBy } = req.body;
       const userInfo = getUserInfoFromRequest(req);
@@ -151,9 +154,9 @@ module.exports = ({
         action: 'UPDATE',
         resource: 'rag_tool_boost',
         resourceId: id,
-        userId: updatedBy || 'admin',
-        userEmail: 'admin@toolmate.com',
-        role: 'admin',
+        userId: updatedBy || actor.userId,
+        userEmail: actor.userEmail,
+        role: actor.role,
         oldData: existingTool,
         newData: updateData,
         metadata: {
@@ -174,6 +177,7 @@ module.exports = ({
 
   router.put('/admin/rag-system/tool/:id/details', async (req, res) => {
     try {
+      const actor = getAdminActorFromRequest(req);
       const { id } = req.params;
       const { name, description, category, budgetTier, toolType, pricing, updatedBy } = req.body;
       const userInfo = getUserInfoFromRequest(req);
@@ -210,9 +214,9 @@ module.exports = ({
         action: 'UPDATE',
         resource: 'rag_tool_details',
         resourceId: id,
-        userId: updatedBy || 'admin',
-        userEmail: 'admin@toolmate.com',
-        role: 'admin',
+        userId: updatedBy || actor.userId,
+        userEmail: actor.userEmail,
+        role: actor.role,
         oldData: existingTool,
         newData: updateData,
         metadata: {
@@ -504,6 +508,7 @@ module.exports = ({
   });
   router.post('/admin/dev-test-override', async (req, res) => {
     try {
+      const actor = getAdminActorFromRequest(req);
       const { overrideKey, description, durationHours, updatedBy } = req.body;
       const userInfo = getUserInfoFromRequest(req);
       const expiresAt = new Date();
@@ -521,9 +526,9 @@ module.exports = ({
         action: 'CREATE',
         resource: 'dev_test_override',
         resourceId: overrideKey,
-        userId: updatedBy || 'admin',
-        userEmail: 'admin@toolmate.com',
-        role: 'admin',
+        userId: updatedBy || actor.userId,
+        userEmail: actor.userEmail,
+        role: actor.role,
         newData: override,
         metadata: {
           overrideKey,

@@ -198,6 +198,7 @@ module.exports = ({ auditLogger, getUserInfoFromRequest, emailTriggers, adminCre
       }
       const result = await adminCredentialsStorage.updateOne({ _id: adminCredential._id }, { $set: updateFields });
       if (result.modifiedCount === 1) {
+        let emailResult = null;
         auditLogger.logAudit({
           action: 'CHANGE_CREDENTIALS',
           resource: 'admin_credential',
@@ -218,7 +219,7 @@ module.exports = ({ auditLogger, getUserInfoFromRequest, emailTriggers, adminCre
           ...userInfo,
         });
         if (passwordChanged && usernameChanged) {
-          await emailTriggers.triggerSystemAlert(
+          emailResult = await emailTriggers.triggerSystemAlert(
             userEmail,
             newUsername,
             `Username and Password Updated`,
@@ -241,7 +242,7 @@ Catch you soon,
 Matey from ToolMate`
           );
         } else if (passwordChanged) {
-          await emailTriggers.triggerSystemAlert(
+          emailResult = await emailTriggers.triggerSystemAlert(
             userEmail,
             adminCredential.username,
             `Password Updated`,
@@ -263,7 +264,7 @@ Catch you soon,
 Matey from ToolMate`
           );
         } else if (usernameChanged) {
-          await emailTriggers.triggerSystemAlert(
+          emailResult = await emailTriggers.triggerSystemAlert(
             userEmail,
             newUsername,
             `Username Updated`,
@@ -289,6 +290,8 @@ Matey from ToolMate`
         return res.status(200).json({
           success: true,
           message: 'Credentials updated successfully.',
+          ...(emailResult ? { email: emailResult } : {}),
+          ...(emailResult && !emailResult.success ? { warning: 'Credential update succeeded but the notification email failed.' } : {}),
         });
       } else {
         auditLogger.logAudit({

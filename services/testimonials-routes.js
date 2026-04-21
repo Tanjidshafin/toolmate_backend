@@ -1,5 +1,6 @@
 const express = require('express');
 const { ObjectId } = require('mongodb');
+const { getAdminActorFromRequest } = require('./admin-actor');
 
 const ALLOWED_STATUSES = new Set(['pending', 'approved', 'rejected']);
 
@@ -297,6 +298,7 @@ module.exports = ({ testimonialsStorage, auditLogger, getUserInfoFromRequest }) 
       const { status, moderatorEmail, rejectionReason } = req.body || {};
       const userInfo = getUserInfoFromRequest(req);
       const normalizedStatus = sanitizeString(status || '', 16).toLowerCase();
+      const actor = getAdminActorFromRequest(req);
 
       if (!ObjectId.isValid(id)) {
         return res.status(400).json({ error: 'Invalid testimonial ID format' });
@@ -328,9 +330,9 @@ module.exports = ({ testimonialsStorage, auditLogger, getUserInfoFromRequest }) 
         action: 'UPDATE_TESTIMONIAL_STATUS',
         resource: 'testimonial',
         resourceId: id,
-        userId: moderatorEmail || 'admin',
-        userEmail: moderatorEmail || 'admin@toolmate.com',
-        role: 'admin',
+        userId: moderatorEmail || actor.userId,
+        userEmail: moderatorEmail || actor.userEmail,
+        role: actor.role,
         newData: updateData,
         ...userInfo,
       });
@@ -347,6 +349,7 @@ module.exports = ({ testimonialsStorage, auditLogger, getUserInfoFromRequest }) 
       const { id } = req.params;
       const { isVisible, moderatorEmail } = req.body;
       const userInfo = getUserInfoFromRequest(req);
+      const actor = getAdminActorFromRequest(req);
 
       if (!ObjectId.isValid(id)) {
         return res.status(400).json({ error: 'Invalid testimonial ID format' });
@@ -377,9 +380,9 @@ module.exports = ({ testimonialsStorage, auditLogger, getUserInfoFromRequest }) 
         action: 'UPDATE_TESTIMONIAL_VISIBILITY',
         resource: 'testimonial',
         resourceId: id,
-        userId: moderatorEmail || 'admin',
-        userEmail: moderatorEmail || 'admin@toolmate.com',
-        role: 'admin',
+        userId: moderatorEmail || actor.userId,
+        userEmail: moderatorEmail || actor.userEmail,
+        role: actor.role,
         newData: updateData,
         ...userInfo,
       });
@@ -396,6 +399,7 @@ module.exports = ({ testimonialsStorage, auditLogger, getUserInfoFromRequest }) 
       const { id } = req.params;
       const { moderatorEmail } = req.body || {};
       const userInfo = getUserInfoFromRequest(req);
+      const actor = getAdminActorFromRequest(req);
 
       if (!ObjectId.isValid(id)) {
         return res.status(400).json({ error: 'Invalid testimonial ID format' });
@@ -422,9 +426,9 @@ module.exports = ({ testimonialsStorage, auditLogger, getUserInfoFromRequest }) 
         action: 'DELETE_TESTIMONIAL',
         resource: 'testimonial',
         resourceId: id,
-        userId: moderatorEmail || 'admin',
-        userEmail: moderatorEmail || 'admin@toolmate.com',
-        role: 'admin',
+        userId: moderatorEmail || actor.userId,
+        userEmail: moderatorEmail || actor.userEmail,
+        role: actor.role,
         newData: deleteData,
         ...userInfo,
       });

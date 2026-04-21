@@ -1,10 +1,42 @@
 const express = require("express")
 const { ObjectId } = require("mongodb")
 const multer = require("multer")
+const { getAdminActorFromRequest } = require("./admin-actor")
+const { enrichUserWithSubscription, getUserProStatus } = require("./subscription-status")
 const upload = multer({ storage: multer.memoryStorage() })
+const ALLOWED_ADMIN_ROLES = new Set(["owner", "admin", "support"])
 
 module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUserInfoFromRequest }) => {
   const router = express.Router()
+  const buildEmailSummary = (emailResults = []) => {
+    const normalizedResults = emailResults.filter(Boolean)
+    return {
+      success: normalizedResults.every((result) => result.success),
+      results: normalizedResults,
+      failed: normalizedResults.filter((result) => !result.success),
+    }
+  }
+
+  const sendResponseWithEmail = (res, statusCode, payload, emailResults = []) => {
+    const email = buildEmailSummary(emailResults)
+    return res.status(statusCode).json({
+      ...payload,
+      ...(email.results.length > 0 ? { email } : {}),
+      ...(email.failed.length > 0 ? { warning: "One or more notification emails failed to send." } : {}),
+    })
+  }
+
+  const requireAdminEmailAccess = (req, res) => {
+    const role = String(req.headers["x-admin-role"] || "").toLowerCase()
+    if (!ALLOWED_ADMIN_ROLES.has(role)) {
+      res.status(403).json({
+        error: "Admin access required for email actions",
+        details: "Missing or invalid admin role header",
+      })
+      return false
+    }
+    return true
+  }
 
   router.post("/store-user", async (req, res) => {
     try {
@@ -13,11 +45,20 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
       const existingUser = await usersStorage.findOne({ userEmail })
       if (existingUser) {
         const oldData = { ...existingUser }
+        const subscriptionActive = Boolean(isSubscribed)
         const updateData = {
           clerkId,
           userName,
           userImage,
           isSubscribed,
+          subscription: {
+            ...(existingUser.subscription || {}),
+            isActive: subscriptionActive,
+            status: subscriptionActive ? "active" : "inactive",
+            plan: subscriptionActive ? "premium" : "free",
+            billingMode: (existingUser.subscription && existingUser.subscription.billingMode) || "auto_renew",
+            updatedAt: new Date(),
+          },
           role,
           updatedAt: new Date(),
         }
@@ -36,17 +77,25 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
         })
         res.json({ updated: true, result })
       } else {
+        const subscriptionActive = Boolean(isSubscribed)
         const userData = {
           userEmail,
           userName,
           userImage,
           isSubscribed: isSubscribed || false,
+          subscription: {
+            isActive: subscriptionActive,
+            status: subscriptionActive ? "active" : "inactive",
+            plan: subscriptionActive ? "premium" : "free",
+            billingMode: "auto_renew",
+            updatedAt: new Date(),
+          },
           role: role || "user",
           createdAt: new Date(),
           updatedAt: new Date(),
           clerkId,
         }
-        await emailTriggers.triggerWelcomeEmail(userData)
+        const welcomeEmailResult = await emailTriggers.triggerWelcomeEmail(userData)
         const result = await usersStorage.insertOne(userData)
         // Log audit for user creation
         await auditLogger.logAudit({
@@ -59,7 +108,7 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
           newData: userData,
           ...userInfo,
         })
-        res.json({ inserted: true, result })
+        return sendResponseWithEmail(res, 200, { inserted: true, result }, [welcomeEmailResult])
       }
     } catch (error) {
       console.error("Error storing user:", error)
@@ -73,7 +122,7 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
       if (!user) {
         return res.status(404).json({ error: "User not found" })
       }
-      res.json(user)
+      res.json(enrichUserWithSubscription(user))
     } catch (error) {
       console.error("Error fetching user:", error)
       res.status(500).json({ error: "Failed to fetch user" })
@@ -98,7 +147,7 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
         .toArray()
       const total = await usersStorage.countDocuments(query)
       res.json({
-        users,
+        users: users.map((user) => enrichUserWithSubscription(user)),
         pagination: {
           current: Number.parseInt(page),
           total: Math.ceil(total / limit),
@@ -113,9 +162,11 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
 
   router.put("/admin/users/:email", async (req, res) => {
     try {
+      const actor = getAdminActorFromRequest(req)
       const { email } = req.params
       const { role, isSubscribed, userEmail, userName, password, isBanned, clerkId } = req.body
       const userInfo = getUserInfoFromRequest(req)
+      const emailResults = []
       const existingUser = await usersStorage.findOne({ userEmail: email })
       if (!existingUser) {
         return res.status(404).json({ error: "User not found in database" })
@@ -125,7 +176,18 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
         updatedAt: new Date(),
       }
       if (role !== undefined) updateData.role = role
-      if (isSubscribed !== undefined) updateData.isSubscribed = isSubscribed
+      if (isSubscribed !== undefined) {
+        const subscriptionActive = Boolean(isSubscribed)
+        updateData.isSubscribed = subscriptionActive
+        updateData.subscription = {
+          ...(existingUser.subscription || {}),
+          isActive: subscriptionActive,
+          status: subscriptionActive ? "active" : "inactive",
+          plan: subscriptionActive ? "premium" : "free",
+          billingMode: (existingUser.subscription && existingUser.subscription.billingMode) || "auto_renew",
+          updatedAt: new Date(),
+        }
+      }
       if (isBanned !== undefined) updateData.isBanned = isBanned
       if (userName) updateData.userName = userName
       if (userEmail && userEmail !== email) updateData.userEmail = userEmail
@@ -138,7 +200,7 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
             clerkUpdates.firstName = nameParts[0] || userName
             clerkUpdates.lastName = nameParts.slice(1).join(" ") || ""
             if (userName !== existingUser.userName) {
-              await emailTriggers.triggerNameChangedEmail(email, userName, existingUser.userName, userName)
+              emailResults.push(await emailTriggers.triggerNameChangedEmail(email, userName, existingUser.userName, userName))
             }
           }
           if (userEmail && userEmail !== email) {
@@ -163,14 +225,17 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
                   }
                 }
               }
-              await emailTriggers.triggerEmailChangedEmail(
-                userEmail,
-                userName || existingUser.userName,
-                email,
-                userEmail,
+              emailResults.push(
+                await emailTriggers.triggerEmailChangedEmail(
+                  userEmail,
+                  userName || existingUser.userName,
+                  email,
+                  userEmail,
+                ),
               )
             } catch (emailError) {
               console.error("❌ Email update failed:", emailError)
+              throw new Error(`Email update failed: ${emailError.message || emailError.toString()}`)
             }
           }
           if (password) {
@@ -183,7 +248,7 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
               if (db) {
                 name = db.userName
               }
-              await emailTriggers.triggerPasswordChangedEmail(email, name)
+              emailResults.push(await emailTriggers.triggerPasswordChangedEmail(email, name))
             } catch (passwordError) {
               console.error("❌ Password update failed:", passwordError)
               throw new Error(`Password update failed: ${passwordError.message}`)
@@ -201,27 +266,31 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
                 name = db.userName
               }
               if (isBanned) {
-                await emailTriggers.triggerUserBannedEmail(email, name)
+                emailResults.push(await emailTriggers.triggerUserBannedEmail(email, name))
               } else {
-                await emailTriggers.triggerUserUnbannedEmail(email, name)
+                emailResults.push(await emailTriggers.triggerUserUnbannedEmail(email, name))
               }
             } catch (banError) {
               throw new Error(`Ban status update failed: ${banError.message}`)
             }
           }
           if (role !== undefined && role !== existingUser.role) {
-            await emailTriggers.triggerRoleChangedEmail(
-              email,
-              userName || existingUser.userName,
-              existingUser.role,
-              role,
+            emailResults.push(
+              await emailTriggers.triggerRoleChangedEmail(
+                email,
+                userName || existingUser.userName,
+                existingUser.role,
+                role,
+              ),
             )
           }
-          if (isSubscribed !== undefined && isSubscribed === true && existingUser.isSubscribed !== true) {
-            await emailTriggers.triggerSubscriptionGiftedEmail(
-              email,
-              userName || existingUser.userName,
-              "Toolmate Admin",
+          if (isSubscribed !== undefined && isSubscribed === true && !getUserProStatus(existingUser)) {
+            emailResults.push(
+              await emailTriggers.triggerSubscriptionGiftedEmail(
+                email,
+                userName || existingUser.userName,
+                "Toolmate Admin",
+              ),
             )
           }
           if (Object.keys(clerkUpdates).length > 0) {
@@ -246,9 +315,9 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
         action: "UPDATE",
         resource: "user",
         resourceId: existingUser._id.toString(),
-        userId: "admin", // Admin performing the action
-        userEmail: "admin@toolmate.com",
-        role: "admin",
+        userId: actor.userId,
+        userEmail: actor.userEmail,
+        role: actor.role,
         oldData: existingUser,
         newData: updateData,
         metadata: {
@@ -259,10 +328,10 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
         ...userInfo,
       })
 
-      res.json({
+      return sendResponseWithEmail(res, 200, {
         message: "User updated successfully",
         updatedFields: Object.keys(updateData),
-      })
+      }, emailResults)
     } catch (error) {
       console.error("❌ Error updating user:", error)
       res.status(500).json({ error: "Failed to update user" })
@@ -271,6 +340,7 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
 
   router.put("/admin/users/:email/password", async (req, res) => {
     try {
+      const actor = getAdminActorFromRequest(req)
       const { email } = req.params
       const { password, clerkId } = req.body
       const userInfo = getUserInfoFromRequest(req)
@@ -296,17 +366,18 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
           },
         )
         const user = await usersStorage.findOne({ userEmail: email })
+        const emailResults = []
         if (user) {
-          await emailTriggers.triggerPasswordChangedEmail(email, user.userName)
+          emailResults.push(await emailTriggers.triggerPasswordChangedEmail(email, user.userName))
         }
         // Log audit for password update by admin
         await auditLogger.logAudit({
           action: "UPDATE_PASSWORD",
           resource: "user",
           resourceId: email,
-          userId: "admin",
-          userEmail: "admin@toolmate.com",
-          role: "admin",
+          userId: actor.userId,
+          userEmail: actor.userEmail,
+          role: actor.role,
           newData: {
             passwordUpdatedAt: new Date(),
             updatedAt: new Date(),
@@ -318,7 +389,7 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
           ...userInfo,
         })
 
-        res.json({ message: "Password updated successfully" })
+        return sendResponseWithEmail(res, 200, { message: "Password updated successfully" }, emailResults)
       } catch (clerkError) {
         console.error("❌ Clerk password update error:", clerkError)
         res.status(400).json({
@@ -334,6 +405,7 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
 
   router.put("/admin/users/:email/ban", async (req, res) => {
     try {
+      const actor = getAdminActorFromRequest(req)
       const { email } = req.params
       const { banned, clerkId } = req.body
       const userInfo = getUserInfoFromRequest(req)
@@ -367,11 +439,12 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
           })
         }
         const user = await usersStorage.findOne({ userEmail: email })
+        const emailResults = []
         if (user) {
           if (banned) {
-            await emailTriggers.triggerUserBannedEmail(email, user.userName)
+            emailResults.push(await emailTriggers.triggerUserBannedEmail(email, user.userName))
           } else {
-            await emailTriggers.triggerUserUnbannedEmail(email, user.userName)
+            emailResults.push(await emailTriggers.triggerUserUnbannedEmail(email, user.userName))
           }
         }
         // Log audit for ban/unban action
@@ -379,9 +452,9 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
           action: banned ? "BAN_USER" : "UNBAN_USER",
           resource: "user",
           resourceId: email,
-          userId: "admin",
-          userEmail: "admin@toolmate.com",
-          role: "admin",
+          userId: actor.userId,
+          userEmail: actor.userEmail,
+          role: actor.role,
           newData: {
             isBanned: banned,
             bannedAt: banned ? new Date() : null,
@@ -394,7 +467,7 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
           ...userInfo,
         })
 
-        res.json({
+        return sendResponseWithEmail(res, 200, {
           success: true,
           message: `User ${banned ? "banned" : "unbanned"} successfully`,
           data: {
@@ -402,7 +475,7 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
             isBanned: banned,
             updatedAt: new Date(), // Corrected variable name
           },
-        })
+        }, emailResults)
       } catch (clerkError) {
         console.error("❌ Clerk ban update error:", clerkError)
         res.status(400).json({
@@ -420,6 +493,7 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
   })
   router.delete("/admin/users/:email", async (req, res) => {
     try {
+      const actor = getAdminActorFromRequest(req)
       const userEmail = req.params.email
       const userInfo = getUserInfoFromRequest(req)
       const existingUser = await usersStorage.findOne({ userEmail })
@@ -435,9 +509,9 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
         action: "DELETE",
         resource: "user",
         resourceId: existingUser._id.toString(),
-        userId: "admin",
-        userEmail: "admin@toolmate.com",
-        role: "admin",
+        userId: actor.userId,
+        userEmail: actor.userEmail,
+        role: actor.role,
         oldData: existingUser,
         metadata: {
           deletedUser: userEmail,
@@ -484,7 +558,7 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
       if (userName !== undefined) {
         updateData.userName = userName
         if (userName !== user.userName) {
-          await emailTriggers.triggerNameChangedEmail(userEmail, userName, user.userName, userName)
+          emailResults.push(await emailTriggers.triggerNameChangedEmail(userEmail, userName, user.userName, userName))
         }
       }
       if (user.clerkId && userName !== undefined) {
@@ -519,11 +593,11 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
         },
         ...userInfo,
       })
-      res.json({
+      return sendResponseWithEmail(res, 200, {
         message: "Profile updated successfully",
         updatedFields: Object.keys(updateData),
         imageUrl: newImageUrl,
-      })
+      }, emailResults)
     } catch (error) {
       console.error("Error updating user profile:", error)
       res.status(500).json({ error: "Failed to update user profile" })
@@ -531,7 +605,9 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
   })
 
   router.post("/admin/users/:email/gift-subscription", async (req, res) => {
+    if (!requireAdminEmailAccess(req, res)) return
     try {
+      const actor = getAdminActorFromRequest(req)
       const { email } = req.params
       const { giftedBy = "Toolmate Admin" } = req.body
       const userInfo = getUserInfoFromRequest(req)
@@ -546,6 +622,14 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
         {
           $set: {
             isSubscribed: true,
+            subscription: {
+              ...(user.subscription || {}),
+              isActive: true,
+              status: "active",
+              plan: "premium",
+              billingMode: (user.subscription && user.subscription.billingMode) || "auto_renew",
+              updatedAt: new Date(),
+            },
             subscriptionGiftedAt: new Date(),
             subscriptionGiftedBy: giftedBy,
             updatedAt: new Date(),
@@ -557,15 +641,15 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
         return res.status(404).json({ error: "User not found in database" })
       }
 
-      await emailTriggers.triggerSubscriptionGiftedEmail(email, user.userName, giftedBy)
+      const emailResult = await emailTriggers.triggerSubscriptionGiftedEmail(email, user.userName, giftedBy)
 
       await auditLogger.logAudit({
         action: "GIFT_SUBSCRIPTION",
         resource: "user",
         resourceId: user._id.toString(),
-        userId: "admin",
-        userEmail: "admin@toolmate.com",
-        role: "admin",
+        userId: actor.userId,
+        userEmail: actor.userEmail,
+        role: actor.role,
         newData: {
           isSubscribed: true,
           subscriptionGiftedAt: new Date(),
@@ -579,10 +663,10 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
         ...userInfo,
       })
 
-      res.json({
+      return sendResponseWithEmail(res, 200, {
         message: "Subscription gifted successfully",
         giftedBy,
-      })
+      }, [emailResult])
     } catch (error) {
       console.error("❌ Error gifting subscription:", error)
       res.status(500).json({ error: "Failed to gift subscription" })
@@ -590,20 +674,22 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
   })
 
   router.post("/admin/post/email", async (req, res) => {
+    if (!requireAdminEmailAccess(req, res)) return
     try {
+      const actor = getAdminActorFromRequest(req)
       const { userName, userEmail, message, subject } = req.body
       const userInfo = getUserInfoFromRequest(req)
       if (!userName || !userEmail || !message || !subject) {
         return res.status(400).json({ success: false, message: "Missing required fields." })
       }
-      await emailTriggers.triggerSystemAlert(userEmail, userName, subject, message)
+      const emailResult = await emailTriggers.triggerSystemAlert(userEmail, userName, subject, message)
       await auditLogger.logAudit({
         action: "SEND_EMAIL",
         resource: "email",
         resourceId: userEmail,
-        userId: "admin",
-        userEmail: "admin@toolmate.com",
-        role: "admin",
+        userId: actor.userId,
+        userEmail: actor.userEmail,
+        role: actor.role,
         newData: {
           recipient: userEmail,
           recipientName: userName,
@@ -616,10 +702,21 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
         },
         ...userInfo,
       })
-      res.status(200).json({ success: true, message: "Email sent successfully." })
+      if (!emailResult.success) {
+        return res.status(502).json({
+          success: false,
+          message: emailResult.userMessage,
+          email: emailResult,
+        })
+      }
+      return res.status(200).json({ success: true, message: "Email sent successfully.", email: emailResult })
     } catch (error) {
       console.error("Error sending email:", error)
-      res.status(500).json({ success: false, message: "Failed to send email." })
+      res.status(500).json({
+        success: false,
+        message: "Failed to send email.",
+        details: error.message || String(error),
+      })
     }
   })
   router.post("/email-change-request", async (req, res) => {
@@ -648,13 +745,19 @@ Hit reply or give our support crew a buzz — we’re always here to help.
 Catch ya soon,  
 Matey from ToolMate
     `
-      await emailTriggers.triggerSystemAlert(
+      const emailResult = await emailTriggers.triggerSystemAlert(
         process.env.FROM_EMAIL,
         "Toolmate Owner",
         "Email Change Requested",
         emailBody,
       )
-      return res.status(200).json({ message: "Email change request sent successfully." })
+      if (!emailResult.success) {
+        return res.status(502).json({
+          message: "Email change request recorded, but the notification email failed.",
+          email: emailResult,
+        })
+      }
+      return res.status(200).json({ message: "Email change request sent successfully.", email: emailResult })
     } catch (error) {
       console.error("Email change request error:", error)
       return res.status(500).json({ error: "Internal server error. Please try again later." })
@@ -728,6 +831,7 @@ Matey from ToolMate
   })
   router.put("/admin/users/:email/permit", async (req, res) => {
     try {
+      const actor = getAdminActorFromRequest(req)
       const { email } = req.params
       const { isPermit } = req.body
       const userInfo = getUserInfoFromRequest(req)
@@ -761,9 +865,9 @@ Matey from ToolMate
         action: isPermit ? "GRANT_BLOG_PERMIT" : "REVOKE_BLOG_PERMIT",
         resource: "user",
         resourceId: existingUser._id.toString(),
-        userId: "admin",
-        userEmail: "admin@toolmate.com",
-        role: "admin",
+        userId: actor.userId,
+        userEmail: actor.userEmail,
+        role: actor.role,
         oldData: { isPermit: existingUser.isPermit },
         newData: updateData,
         metadata: {
@@ -775,12 +879,15 @@ Matey from ToolMate
       })
       if (isPermit && !existingUser.isPermit) {
         try {
-          await emailTriggers.triggerSystemAlert(
+          const emailResult = await emailTriggers.triggerSystemAlert(
             email,
             existingUser.userName,
             "Blog Posting Permission Granted",
             `Hi ${existingUser.userName},\n\nGreat news! You now have permission to create and manage blog posts on our platform.\n\nYou can start creating amazing content right away!\n\nBest regards,\nThe Admin Team`,
           )
+          if (!emailResult.success) {
+            console.warn("Permit notification email failed:", emailResult.technicalMessage)
+          }
         } catch (emailError) {
           console.warn("Failed to send permit notification email:", emailError)
         }

@@ -28,12 +28,12 @@ const derivePlanFromStatus = (status) => {
 };
 
 const normalizeSubscription = (user) => {
-  const legacyActive = Boolean(user?.isSubscribed);
   const subscription = user?.subscription || {};
+  const status = subscription.status || 'inactive';
 
   return {
-    status: subscription.status || (legacyActive ? 'active' : 'inactive'),
-    plan: subscription.plan || (legacyActive ? 'premium' : 'free'),
+    status,
+    plan: subscription.plan || (status === 'active' ? 'premium' : 'free'),
     billingMode: subscription.billingMode || 'auto_renew',
     stripeCustomerId: subscription.stripeCustomerId || null,
     stripeSubscriptionId: subscription.stripeSubscriptionId || null,
@@ -54,6 +54,10 @@ const isSubscriptionEntitled = (subscription, now = new Date()) => {
   }
 
   return false;
+};
+
+const isUserPro = (user) => {
+  return normalizeSubscription(user).status === 'active';
 };
 
 const getBillingPriceId = () => {
@@ -930,7 +934,20 @@ module.exports = (dependencies) => {
       };
       const result = await subscriptionStorage.insertOne(logEntry);
       if (type === 'purchase' && metadata?.source === 'trusted_webhook') {
-        await usersStorage.updateOne({ userEmail }, { $set: { isSubscribed: true } });
+        const trustedSubscription = normalizeSubscription(user);
+        await usersStorage.updateOne({ userEmail }, {
+          $set: {
+            isSubscribed: true,
+            subscription: {
+              ...trustedSubscription,
+              status: 'active',
+              plan: 'premium',
+              isActive: true,
+              updatedAt: new Date(),
+            },
+            updatedAt: new Date(),
+          },
+        });
       }
       await auditLogger.logAudit({
         action: 'CREATE_PURCHASE_LOG',
@@ -1041,7 +1058,7 @@ module.exports = (dependencies) => {
         feedback: feedback || null,
         metadata: {
           ...userInfo,
-          previousPlan: user.isSubscribed ? 'premium' : 'free',
+          previousPlan: isUserPro(user) ? 'premium' : 'free',
           idempotencyKey: subscriptionCancelKey,
           stripeSubscriptionId: nextSubscription.stripeSubscriptionId,
         },
@@ -1064,7 +1081,7 @@ module.exports = (dependencies) => {
         userEmail: userEmail,
         role: user.role || 'user',
         oldData: {
-          isSubscribed: user.isSubscribed,
+          isSubscribed: isUserPro(user),
         },
         newData: updateData,
         metadata: {
@@ -1100,7 +1117,7 @@ module.exports = (dependencies) => {
         return res.status(404).json({ error: 'User not found' });
       }
 
-      if (user.isSubscribed) {
+      if (isUserPro(user)) {
         return res.status(400).json({ error: 'Subscription is already active' });
       }
       const currentSubscription = normalizeSubscription(user);
@@ -1149,7 +1166,7 @@ module.exports = (dependencies) => {
         userEmail: userEmail,
         role: user.role || 'user',
         oldData: {
-          isSubscribed: user.isSubscribed,
+          isSubscribed: isUserPro(user),
         },
         newData: updateData,
         metadata: userInfo,
@@ -1304,7 +1321,7 @@ module.exports = (dependencies) => {
         recentActivity,
       ] = await Promise.all([
         usersStorage.countDocuments({}),
-        usersStorage.countDocuments({ isSubscribed: true }),
+        usersStorage.countDocuments({ 'subscription.status': 'active' }),
         usersStorage.countDocuments(dateFilter),
         subscriptionStorage.countDocuments({
           type: { $in: ['purchase', 'reactivation'] },
@@ -1546,9 +1563,15 @@ module.exports = (dependencies) => {
         query = { ...query, ...dateFilter };
       }
       if (status === 'active') {
-        query.isSubscribed = true;
+        query['subscription.status'] = 'active';
       } else if (status === 'inactive') {
-        query.isSubscribed = { $ne: true };
+        query.$and = query.$and || [];
+        query.$and.push({
+          $or: [
+            { 'subscription.status': { $exists: false } },
+            { 'subscription.status': { $ne: 'active' } },
+          ],
+        });
       }
       if (search) {
         query.$or = [{ userEmail: { $regex: search, $options: 'i' } }, { userName: { $regex: search, $options: 'i' } }];
@@ -1595,7 +1618,9 @@ module.exports = (dependencies) => {
             userName: user.userName || 'Best Mates Subscription',
             userEmail: user.userEmail,
             userImage: user.userImage,
-            isSubscribed: user.isSubscribed || false,
+            isSubscribed: isUserPro(user),
+            isPro: isUserPro(user),
+            subscription: normalizeSubscription(user),
             role: user.role || 'user',
             isBanned: user.isBanned || false,
             createdAt: user.createdAt,
@@ -1934,7 +1959,7 @@ module.exports = (dependencies) => {
       const { period = '30d', startDate, endDate } = req.query;
       const { dateFilter } = getDateFilters(period, startDate, endDate);
       const now = new Date();
-      const activeSubscriptions = await usersStorage.find({ isSubscribed: true }).toArray();
+      const activeSubscriptions = await usersStorage.find({ 'subscription.status': 'active' }).toArray();
       let mrr = 0;
       for (const user of activeSubscriptions) {
         const latestPurchase = await subscriptionStorage.findOne(
@@ -1970,7 +1995,7 @@ module.exports = (dependencies) => {
           type: 'cancellation',
           ...dateFilter,
         }),
-        usersStorage.countDocuments({ isSubscribed: true }),
+        usersStorage.countDocuments({ 'subscription.status': 'active' }),
       ]);
       const churnRate =
         activeSubscriptions + cancellationsInPeriod > 0
@@ -2004,7 +2029,7 @@ module.exports = (dependencies) => {
       const uniquePayingUsersInPeriod = totalRevenueResult[0]?.uniqueUsers?.length || 0;
       const totalUsers = totalUniqueUsers;
       const arpu = totalUsers > 0 ? totalRevenue / totalUsers : 0;
-      const activeSubscriptions = await usersStorage.countDocuments({ isSubscribed: true });
+      const activeSubscriptions = await usersStorage.countDocuments({ 'subscription.status': 'active' });
       const churnRate =
         activeSubscriptions + churnRateData > 0 ? churnRateData / (activeSubscriptions + churnRateData) : 0;
       const ltv = churnRate > 0 ? arpu / churnRate : 0;
@@ -2117,7 +2142,7 @@ module.exports = (dependencies) => {
   });
   async function checkUserActiveInMonth(user, monthStart, monthEnd, subscriptionStorage) {
     try {
-      if (user.isSubscribed && user.createdAt <= monthEnd) {
+      if (isUserPro(user) && user.createdAt <= monthEnd) {
         const cancellation = await subscriptionStorage.findOne(
           {
             userEmail: user.userEmail,

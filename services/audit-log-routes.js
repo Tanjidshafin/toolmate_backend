@@ -1,5 +1,6 @@
 const express = require("express")
 const { ObjectId } = require("mongodb")
+const { getAdminActorFromRequest } = require("./admin-actor")
 module.exports = ({ auditLogger, getUserInfoFromRequest }) => {
   const router = express.Router()
 
@@ -100,6 +101,7 @@ module.exports = ({ auditLogger, getUserInfoFromRequest }) => {
 
   router.post("/admin/audit-logs/cleanup", async (req, res) => {
     try {
+      const actor = getAdminActorFromRequest(req)
       const { daysToKeep = 365 } = req.body
       const userInfo = getUserInfoFromRequest(req)
       const deletedCount = await auditLogger.cleanupOldLogs(Number.parseInt(daysToKeep))
@@ -107,9 +109,9 @@ module.exports = ({ auditLogger, getUserInfoFromRequest }) => {
         action: "CLEANUP",
         resource: "audit_logs",
         resourceId: null,
-        userId: "admin",
-        userEmail: "admin@toolmate.com",
-        role: "admin",
+        userId: actor.userId,
+        userEmail: actor.userEmail,
+        role: actor.role,
         newData: {
           deletedCount,
           daysToKeep: Number.parseInt(daysToKeep),

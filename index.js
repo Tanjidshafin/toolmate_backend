@@ -31,7 +31,6 @@ const messageRoutes = require('./services/message-routes');
 const toolRoutes = require('./services/tool-routes');
 const userRoutes = require('./services/user-routes');
 const flaggedMessageRoutes = require('./services/flagged-message-routes');
-const sessionRoutes = require('./services/session-routes');
 const redirectTrackingRoutes = require('./services/redirect-tracking-routes');
 const analyticsRoutes = require('./services/analytics-routes');
 const ragSystemRoutes = require('./services/rag-system-routes');
@@ -45,6 +44,7 @@ const blogRoutes = require('./services/blogs-route');
 const subscriptionRoutes = require('./services/subscription-routes');
 const storeLocationRoutes = require('./services/store-location');
 const testimonialsRoutes = require('./services/testimonials-routes');
+const { getAdminActorFromRequest } = require('./services/admin-actor');
 const { reconcileSubscriptionState } = require('./services/subscription-reconciliation');
 
 const validateStripeEnv = () => {
@@ -205,6 +205,10 @@ async function run() {
     await Promise.all([
       sessionsStorage.createIndex({ timestamp: -1, sessionId: 1, userEmail: 1 }),
       sessionsStorage.createIndex({ sessionId: 1, userEmail: 1 }),
+      emailLogsStorage.createIndex({ timestamp: -1 }),
+      emailLogsStorage.createIndex({ type: 1, status: 1, timestamp: -1 }),
+      emailLogsStorage.createIndex({ recipient: 1, timestamp: -1 }),
+      emailLogsStorage.createIndex({ failureCategory: 1, timestamp: -1 }),
       testimonialsStorage.createIndex({ isVisible: 1, createdAt: -1 }),
       testimonialsStorage.createIndex({ deletedAt: 1, createdAt: -1 }),
       testimonialsStorage.createIndex({ status: 1, createdAt: -1 }),
@@ -222,7 +226,12 @@ async function run() {
     auditLogger = new AuditLogger(auditLogsStorage);
     clerkClient = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
     function getUserInfoFromRequest(req) {
+      const actor = getAdminActorFromRequest(req);
       return {
+        userId: actor.userId,
+        userEmail: actor.userEmail,
+        role: actor.role,
+        username: actor.username,
         ipAddress: req.ip || req.connection.remoteAddress,
         userAgent: req.headers['user-agent'],
       };
@@ -279,12 +288,16 @@ async function run() {
               };
             }
           }
+          const injectedBy = typeof data?.adminUserEmail === 'string' && data.adminUserEmail.trim()
+            ? data.adminUserEmail.trim()
+            : 'unknown-admin';
+
           await auditLogger.logAudit({
             action: 'INJECT_MESSAGE',
             resource: 'session',
             resourceId: data.sessionId,
-            userId: 'admin',
-            userEmail: 'admin@toolmate.com',
+            userId: injectedBy,
+            userEmail: injectedBy,
             role: 'admin',
             newData: {
               message: data.message,
@@ -475,10 +488,6 @@ async function run() {
             subscriptionStorage,
             auditLogger,
           });
-
-          console.log(
-            `Subscription reconciliation complete. scanned=${summary.scanned}, changed=${summary.changed}, failed=${summary.failed}`,
-          );
         } catch (error) {
           console.error('Error in subscription reconciliation cron job:', error);
         }
@@ -627,7 +636,6 @@ async function run() {
     app.use('/', toolRoutes(routeDependencies));
     app.use('/', userRoutes(routeDependencies));
     app.use('/', flaggedMessageRoutes(routeDependencies));
-    app.use('/', sessionRoutes(routeDependencies));
     app.use('/', redirectTrackingRoutes(routeDependencies));
     app.use('/', analyticsRoutes(routeDependencies));
     app.use('/', ragSystemRoutes(routeDependencies));
@@ -652,10 +660,6 @@ async function run() {
       console.log(`Server is running on port ${PORT}`);
       console.log(`Socket.io server is ready`);
       console.log(`Boost expiry cron job scheduled`);
-      console.log(
-        `Subscription reconciliation cron scheduled: ${SUBSCRIPTION_RECONCILIATION_CRON}` +
-          (SUBSCRIPTION_RECONCILIATION_TIMEZONE ? ` (timezone: ${SUBSCRIPTION_RECONCILIATION_TIMEZONE})` : ' (server local time)'),
-      );
     });
   } catch (err) {
     console.error('MongoDB connection error:', err);

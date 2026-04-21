@@ -9,6 +9,41 @@ module.exports = ({
   chatLogsStorage,
 }) => {
   const router = express.Router();
+  router.get('/get-feedback', async (req, res) => {
+    try {
+      const { page = 1, limit = 20, search } = req.query;
+      const pageNumber = Math.max(Number.parseInt(page, 10) || 1, 1);
+      const limitNumber = Math.min(Math.max(Number.parseInt(limit, 10) || 20, 1), 100);
+      const skip = (pageNumber - 1) * limitNumber;
+
+      const query = {};
+      if (search && search.trim() !== '') {
+        const searchRegex = { $regex: search.trim(), $options: 'i' };
+        query.$or = [{ messageText: searchRegex }, { name: searchRegex }, { email: searchRegex }];
+      }
+
+      const [feedback, total] = await Promise.all([
+        feedbackStorage.find(query).sort({ createdAt: -1 }).skip(skip).limit(limitNumber).toArray(),
+        feedbackStorage.countDocuments(query),
+      ]);
+
+      res.json({
+        feedback,
+        pagination: {
+          current: pageNumber,
+          total: Math.ceil(total / limitNumber),
+          count: total,
+        },
+      });
+    } catch (err) {
+      console.error('Error fetching feedback:', err);
+      res.status(500).send({
+        error: 'Failed to fetch feedback',
+        details: err.message,
+      });
+    }
+  });
+
   router.post('/add-feedback', async (req, res) => {
     try {
       const data = req.body;

@@ -1,5 +1,6 @@
 const express = require("express")
 const router = express.Router()
+const { getAdminActorFromRequest } = require("./admin-actor")
 module.exports = (dependencies) => {
   const { ObjectId, blogsStorage, auditLogger, getUserInfoFromRequest } = dependencies
   router.get("/api/blogs", async (req, res) => {
@@ -136,6 +137,7 @@ module.exports = (dependencies) => {
 
   router.post("/api/blogs", async (req, res) => {
     try {
+      const actor = getAdminActorFromRequest(req)
       const blogData = {
         ...req.body,
         publishedDate: req.body.publishedDate || new Date().toISOString(),
@@ -147,9 +149,9 @@ module.exports = (dependencies) => {
         action: "CREATE_BLOG",
         resource: "blog",
         resourceId: result.insertedId.toString(),
-        userId: "admin",
-        userEmail: "admin@toolmate.com",
-        role: "admin",
+        userId: actor.userId,
+        userEmail: actor.userEmail,
+        role: actor.role,
         newData: blogData,
         metadata: getUserInfoFromRequest(req),
       })
@@ -167,6 +169,7 @@ module.exports = (dependencies) => {
   })
   router.put("/api/blogs/:id", async (req, res) => {
     try {
+      const actor = getAdminActorFromRequest(req)
       const { id } = req.params
       const updateData = {
         ...req.body,
@@ -189,9 +192,9 @@ module.exports = (dependencies) => {
         action: "UPDATE_BLOG",
         resource: "blog",
         resourceId: id,
-        userId: "admin",
-        userEmail: "admin@toolmate.com",
-        role: "admin",
+        userId: actor.userId,
+        userEmail: actor.userEmail,
+        role: actor.role,
         newData: updateData,
         metadata: getUserInfoFromRequest(req),
       })
@@ -209,6 +212,7 @@ module.exports = (dependencies) => {
   })
   router.delete("/api/blogs/:id", async (req, res) => {
     try {
+      const actor = getAdminActorFromRequest(req)
       const { id } = req.params
       let query
       if (ObjectId.isValid(id)) {
@@ -228,9 +232,9 @@ module.exports = (dependencies) => {
         action: "DELETE_BLOG",
         resource: "blog",
         resourceId: id,
-        userId: "admin",
-        userEmail: "admin@toolmate.com",
-        role: "admin",
+        userId: actor.userId,
+        userEmail: actor.userEmail,
+        role: actor.role,
         oldData: blog,
         metadata: getUserInfoFromRequest(req),
       })

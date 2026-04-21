@@ -1,7 +1,17 @@
 const express = require("express")
 const { ObjectId } = require("mongodb")
+const { getAdminActorFromRequest } = require("./admin-actor")
+const { enrichUserWithSubscription } = require("./subscription-status")
 
-module.exports = ({ flaggedMessagesStorage, sessionsStorage, usersStorage, auditLogger, getUserInfoFromRequest }) => {
+module.exports = ({
+  flaggedMessagesStorage,
+  sessionsStorage,
+  usersStorage,
+  messagesJobStorage,
+  mateyChatSessionsStorage,
+  auditLogger,
+  getUserInfoFromRequest,
+}) => {
   const router = express.Router()
 
   router.get("/admin/flagged-messages/lightweight", async (req, res) => {
@@ -28,6 +38,13 @@ module.exports = ({ flaggedMessagesStorage, sessionsStorage, usersStorage, audit
             status: 1,
             flaggedAt: 1,
             messageText: 1,
+            reasons: 1,
+            otherReason: 1,
+            messageTimestamp: 1,
+            isLoggedInUser: 1,
+            messageId: 1,
+            adminComments: 1,
+            reviewedBy: 1,
           },
         })
         .sort({ flaggedAt: -1 })
@@ -125,6 +142,7 @@ module.exports = ({ flaggedMessagesStorage, sessionsStorage, usersStorage, audit
 
   router.post("/admin/cleanup-expired-messages", async (req, res) => {
     try {
+      const actor = getAdminActorFromRequest(req)
       const userInfo = getUserInfoFromRequest(req)
       const now = new Date()
       const result = await flaggedMessagesStorage.deleteMany({
@@ -135,9 +153,9 @@ module.exports = ({ flaggedMessagesStorage, sessionsStorage, usersStorage, audit
         action: "CLEANUP",
         resource: "flagged_messages",
         resourceId: null,
-        userId: "admin",
-        userEmail: "admin@toolmate.com",
-        role: "admin",
+        userId: actor.userId,
+        userEmail: actor.userEmail,
+        role: actor.role,
         newData: {
           deletedCount: result.deletedCount,
           cleanupDate: now,
@@ -161,6 +179,7 @@ module.exports = ({ flaggedMessagesStorage, sessionsStorage, usersStorage, audit
 
   router.put("/admin/flagged-messages/:id", async (req, res) => {
     try {
+      const actor = getAdminActorFromRequest(req)
       const { id } = req.params
       const { status, adminComments, reviewedBy } = req.body
       const userInfo = getUserInfoFromRequest(req)
@@ -219,9 +238,9 @@ module.exports = ({ flaggedMessagesStorage, sessionsStorage, usersStorage, audit
         action: "UPDATE",
         resource: "flagged_message",
         resourceId: id,
-        userId: reviewedBy || "admin",
-        userEmail: "admin@toolmate.com",
-        role: "admin",
+        userId: reviewedBy || actor.userId,
+        userEmail: actor.userEmail,
+        role: actor.role,
         oldData: currentMessage,
         newData: updateData,
         metadata: {
@@ -245,23 +264,64 @@ module.exports = ({ flaggedMessagesStorage, sessionsStorage, usersStorage, audit
       if (!flaggedMessage) {
         return res.status(404).json({ error: "Flagged message not found" })
       }
+
+      const flaggedMessageId = typeof flaggedMessage.messageId === "string" ? flaggedMessage.messageId.trim() : null
+      const flaggedObjectId =
+        flaggedMessageId && ObjectId.isValid(flaggedMessageId) ? new ObjectId(flaggedMessageId) : null
+
+      const matchedMessage =
+        flaggedObjectId || flaggedMessageId
+          ? await messagesJobStorage.findOne(
+              {
+                $or: [
+                  ...(flaggedObjectId ? [{ _id: flaggedObjectId }] : []),
+                  ...(flaggedMessageId ? [{ clientMessageId: flaggedMessageId }] : []),
+                ],
+              },
+              {
+                projection: {
+                  sessionId: 1,
+                },
+              },
+            )
+          : null
+
+      const sessionId = matchedMessage?.sessionId || null
+
       let session = null
+      let sessionMessages = []
       let user = null
+      if (sessionId) {
+        session = await mateyChatSessionsStorage.findOne({ sessionId })
+        sessionMessages = await messagesJobStorage
+          .find(
+            { sessionId },
+            {
+              projection: {
+                _id: 1,
+                clientMessageId: 1,
+                sessionId: 1,
+                role: 1,
+                content: 1,
+                images: 1,
+                suggestedTools: 1,
+                toolsUsed: 1,
+                isToolSuggestion: 1,
+                metadata: 1,
+                createdAt: 1,
+                updatedAt: 1,
+              },
+            },
+          )
+          .sort({ createdAt: 1, _id: 1 })
+          .limit(40)
+          .toArray()
+      }
+
       if (flaggedMessage.userEmail) {
         const userEmailToSearch = Array.isArray(flaggedMessage.userEmail)
           ? flaggedMessage.userEmail[0]
           : flaggedMessage.userEmail
-        session = await sessionsStorage.findOne({
-          $or: [
-            { userEmail: userEmailToSearch },
-            {
-              userEmail: {
-                $in: Array.isArray(flaggedMessage.userEmail) ? flaggedMessage.userEmail : [flaggedMessage.userEmail],
-              },
-            },
-          ],
-          "messages.id": flaggedMessage.messageId,
-        })
         user = await usersStorage.findOne({
           $or: [
             { userEmail: userEmailToSearch },
@@ -273,15 +333,52 @@ module.exports = ({ flaggedMessagesStorage, sessionsStorage, usersStorage, audit
           ],
         })
       } else {
-        session = await sessionsStorage.findOne({
-          "messages.id": flaggedMessage.messageId,
-        })
         user = null
       }
+
+      const firstUserMessage = sessionMessages.find((message) => message.role === "user")
+      const mateyMessages = sessionMessages.filter((message) => message.role === "matey")
+      const lastMateyMessage = mateyMessages[mateyMessages.length - 1] || null
+
+      const toPublicMessage = (doc) => ({
+        id: doc._id ? doc._id.toString() : doc.id,
+        serverMessageId: doc._id ? doc._id.toString() : null,
+        clientMessageId: doc.clientMessageId || null,
+        sessionId: doc.sessionId,
+        role: doc.role,
+        text: typeof doc.content === "string" ? doc.content : "",
+        content: typeof doc.content === "string" ? doc.content : "",
+        sender: doc.role,
+        images: Array.isArray(doc.images) ? doc.images : [],
+        suggestedTools: Array.isArray(doc.suggestedTools) ? doc.suggestedTools : [],
+        toolsUsed: Array.isArray(doc.toolsUsed) ? doc.toolsUsed : [],
+        isToolSuggestion:
+          typeof doc.isToolSuggestion === "boolean"
+            ? doc.isToolSuggestion
+            : Array.isArray(doc.suggestedTools) && doc.suggestedTools.length > 0,
+        metadata: doc.metadata && typeof doc.metadata === "object" ? doc.metadata : {},
+        timestamp: doc.createdAt,
+        createdAt: doc.createdAt,
+        updatedAt: doc.updatedAt,
+      })
+
+      const aggregatedSuggestedTools = mateyMessages.flatMap((message) =>
+        Array.isArray(message.suggestedTools) ? message.suggestedTools : [],
+      )
+
       res.json({
         flaggedMessage,
-        sessionContext: session || null,
-        userDetails: user || null,
+        sessionContext: session
+          ? {
+              sessionId,
+              timestamp: session.lastMessageAt || session.updatedAt || session.createdAt || flaggedMessage.flaggedAt,
+              prompt: firstUserMessage?.content || "",
+              mateyResponse: lastMateyMessage?.content || "",
+              messages: sessionMessages.map(toPublicMessage),
+              suggestedTools: aggregatedSuggestedTools,
+            }
+          : null,
+        userDetails: enrichUserWithSubscription(user),
       })
     } catch (error) {
       console.error("Error fetching session context:", error)
@@ -291,6 +388,7 @@ module.exports = ({ flaggedMessagesStorage, sessionsStorage, usersStorage, audit
 
   router.delete("/admin/flagged-messages/:id", async (req, res) => {
     try {
+      const actor = getAdminActorFromRequest(req)
       const { id } = req.params
       const userInfo = getUserInfoFromRequest(req)
       if (!ObjectId.isValid(id)) {
@@ -311,9 +409,9 @@ module.exports = ({ flaggedMessagesStorage, sessionsStorage, usersStorage, audit
         action: "DELETE",
         resource: "flagged_message",
         resourceId: id,
-        userId: "admin",
-        userEmail: "admin@toolmate.com",
-        role: "admin",
+        userId: actor.userId,
+        userEmail: actor.userEmail,
+        role: actor.role,
         oldData: flaggedMessage,
         metadata: {
           adminAction: true,
