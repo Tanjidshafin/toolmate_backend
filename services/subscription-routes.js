@@ -5,60 +5,17 @@ const { format, differenceInMonths, startOfMonth, endOfMonth, addMonths, differe
 const SUBSCRIPTION_GRACE_DAYS = Number.parseInt(process.env.SUBSCRIPTION_GRACE_DAYS || '3', 10);
 const ONE_TIME_SUBSCRIPTION_DAYS = Number.parseInt(process.env.ONE_TIME_SUBSCRIPTION_DAYS || '30', 10);
 
-const ACTIVE_STATUSES = new Set(['active', 'trialing']);
+const {
+  ACTIVE_STATUSES,
+  parseSubscriptionFields,
+  isSubscriptionEntitled,
+  normalizeSubscription,
+  prepareSubscriptionForStore,
+  buildSubscriptionViewFromCore,
+  getUserProStatus,
+} = require('./subscription-status');
 
-// Stripe terminal states that should drop the user back to the free plan in our DB.
-// `past_due` is intentionally excluded because we hold a grace window for it.
-const TERMINAL_STATUSES = new Set([
-  'canceled',
-  'unpaid',
-  'incomplete_expired',
-  'paused',
-  'inactive',
-]);
-
-// A user's stored plan should follow entitlement, not just the fact that we once sold
-// them a subscription. We keep `premium` only while they are active/trialing or inside
-// the past_due grace window; terminal states always collapse to `free`.
-const derivePlanFromStatus = (status) => {
-  if (!status) return 'free';
-  if (ACTIVE_STATUSES.has(status) || status === 'past_due') return 'premium';
-  if (TERMINAL_STATUSES.has(status)) return 'free';
-  return 'free';
-};
-
-const normalizeSubscription = (user) => {
-  const subscription = user?.subscription || {};
-  const status = subscription.status || 'inactive';
-
-  return {
-    status,
-    plan: subscription.plan || (status === 'active' ? 'premium' : 'free'),
-    billingMode: subscription.billingMode || 'auto_renew',
-    stripeCustomerId: subscription.stripeCustomerId || null,
-    stripeSubscriptionId: subscription.stripeSubscriptionId || null,
-    currentPeriodStart: subscription.currentPeriodStart ? new Date(subscription.currentPeriodStart) : null,
-    currentPeriodEnd: subscription.currentPeriodEnd ? new Date(subscription.currentPeriodEnd) : null,
-    cancelAtPeriodEnd: Boolean(subscription.cancelAtPeriodEnd),
-    gracePeriodEndsAt: subscription.gracePeriodEndsAt ? new Date(subscription.gracePeriodEndsAt) : null,
-    updatedAt: subscription.updatedAt ? new Date(subscription.updatedAt) : null,
-  };
-};
-
-const isSubscriptionEntitled = (subscription, now = new Date()) => {
-  if (!subscription) return false;
-  if (ACTIVE_STATUSES.has(subscription.status)) return true;
-
-  if (subscription.status === 'past_due' && subscription.gracePeriodEndsAt) {
-    return now <= new Date(subscription.gracePeriodEndsAt);
-  }
-
-  return false;
-};
-
-const isUserPro = (user) => {
-  return normalizeSubscription(user).status === 'active';
-};
+const isUserPro = getUserProStatus;
 
 const getBillingPriceId = () => {
   return process.env.STRIPE_PRICE_ID_BEST_MATES_RECURRING || process.env.STRIPE_PRICE_ID_BEST_MATES || null;
@@ -91,18 +48,20 @@ module.exports = (dependencies) => {
   const router = express.Router();
 
   const upsertSubscriptionState = async (userEmail, nextSubscription) => {
-    const entitled = isSubscriptionEntitled(nextSubscription);
+    const now = new Date();
+    const toStore = prepareSubscriptionForStore(nextSubscription, now);
+    const entitled = isSubscriptionEntitled(toStore, now);
 
     await usersStorage.updateOne(
       { userEmail },
       {
         $set: {
           subscription: {
-            ...nextSubscription,
-            updatedAt: new Date(),
+            ...toStore,
+            updatedAt: now,
           },
           isSubscribed: entitled,
-          updatedAt: new Date(),
+          updatedAt: now,
         },
       }
     );
@@ -210,7 +169,7 @@ module.exports = (dependencies) => {
       };
     }
 
-    const nextSubscription = normalizeSubscription(user);
+    const nextSubscription = parseSubscriptionFields(user);
     const now = new Date();
     const isLegacyOneTimeCheckout =
       checkoutSession.mode === 'payment' || checkoutSession.metadata?.billingMode === 'one_time';
@@ -250,7 +209,6 @@ module.exports = (dependencies) => {
     }
 
     nextSubscription.status = stripeSubscription?.status || 'active';
-    nextSubscription.plan = derivePlanFromStatus(nextSubscription.status);
     nextSubscription.billingMode = 'auto_renew';
     nextSubscription.stripeCustomerId =
       (stripeSubscription?.customer && typeof stripeSubscription.customer === 'string'
@@ -297,9 +255,9 @@ module.exports = (dependencies) => {
 
     if (!user) return false;
 
-    const nextSubscription = normalizeSubscription(user);
+    const nextSubscription = parseSubscriptionFields(user);
+    const prevCore = { ...nextSubscription };
     nextSubscription.status = stripeSubscription.status || 'inactive';
-    nextSubscription.plan = derivePlanFromStatus(nextSubscription.status);
     nextSubscription.billingMode = 'auto_renew';
     nextSubscription.stripeCustomerId = customerId;
     nextSubscription.stripeSubscriptionId = stripeSubscription.id;
@@ -310,10 +268,15 @@ module.exports = (dependencies) => {
       ? new Date(stripeSubscription.current_period_end * 1000)
       : nextSubscription.currentPeriodEnd;
     nextSubscription.cancelAtPeriodEnd = Boolean(stripeSubscription.cancel_at_period_end);
-    nextSubscription.gracePeriodEndsAt =
-      stripeSubscription.status === 'past_due'
-        ? new Date(Date.now() + SUBSCRIPTION_GRACE_DAYS * 24 * 60 * 60 * 1000)
-        : null;
+    if (nextSubscription.status === 'past_due') {
+      if (prevCore.status === 'past_due' && prevCore.gracePeriodEndsAt) {
+        nextSubscription.gracePeriodEndsAt = new Date(prevCore.gracePeriodEndsAt);
+      } else {
+        nextSubscription.gracePeriodEndsAt = new Date(Date.now() + SUBSCRIPTION_GRACE_DAYS * 24 * 60 * 60 * 1000);
+      }
+    } else {
+      nextSubscription.gracePeriodEndsAt = null;
+    }
 
     await upsertSubscriptionState(user.userEmail, nextSubscription);
 
@@ -643,9 +606,11 @@ module.exports = (dependencies) => {
           });
 
           if (user) {
-            const nextSubscription = normalizeSubscription(user);
+            const nextSubscription = parseSubscriptionFields(user);
+            if (nextSubscription.status !== 'past_due' || !nextSubscription.gracePeriodEndsAt) {
+              nextSubscription.gracePeriodEndsAt = new Date(Date.now() + SUBSCRIPTION_GRACE_DAYS * 24 * 60 * 60 * 1000);
+            }
             nextSubscription.status = 'past_due';
-            nextSubscription.gracePeriodEndsAt = new Date(Date.now() + SUBSCRIPTION_GRACE_DAYS * 24 * 60 * 60 * 1000);
             await upsertSubscriptionState(user.userEmail, nextSubscription);
           }
           break;
@@ -741,41 +706,38 @@ module.exports = (dependencies) => {
       } catch (error) {
         console.log(error);
       }
-      const normalizedSubscription = normalizeSubscription(user);
+      const subscriptionCore = parseSubscriptionFields(user);
       const now = new Date();
 
       const shouldExpireOneTime =
-        normalizedSubscription.status === 'active' &&
-        normalizedSubscription.billingMode === 'one_time' &&
-        normalizedSubscription.currentPeriodEnd &&
-        now > new Date(normalizedSubscription.currentPeriodEnd);
+        subscriptionCore.status === 'active' &&
+        subscriptionCore.billingMode === 'one_time' &&
+        subscriptionCore.currentPeriodEnd &&
+        now > new Date(subscriptionCore.currentPeriodEnd);
 
       const shouldExpireGrace =
-        normalizedSubscription.status === 'past_due' &&
-        normalizedSubscription.gracePeriodEndsAt &&
-        now > new Date(normalizedSubscription.gracePeriodEndsAt);
+        subscriptionCore.status === 'past_due' &&
+        subscriptionCore.gracePeriodEndsAt &&
+        now > new Date(subscriptionCore.gracePeriodEndsAt);
 
       if (shouldExpireOneTime || shouldExpireGrace) {
-        normalizedSubscription.status = 'inactive';
-        normalizedSubscription.plan = 'free';
-        normalizedSubscription.gracePeriodEndsAt = null;
-        await upsertSubscriptionState(userEmail, normalizedSubscription);
+        subscriptionCore.status = 'inactive';
+        subscriptionCore.plan = 'free';
+        subscriptionCore.gracePeriodEndsAt = null;
+        await upsertSubscriptionState(userEmail, subscriptionCore);
       }
 
-      // Defensive: older rows may still have `plan='premium'` alongside a terminal status
-      // (e.g. `canceled`). Normalize on read so the client never sees the mismatched
-      // "Best Mate + Canceled" pair, and persist the correction opportunistically.
-      const expectedPlan = derivePlanFromStatus(normalizedSubscription.status);
-      if (normalizedSubscription.plan !== expectedPlan) {
-        normalizedSubscription.plan = expectedPlan;
+      const healed = prepareSubscriptionForStore(subscriptionCore, now);
+      const entitled = isSubscriptionEntitled(subscriptionCore, now);
+      if (user.subscription?.plan !== healed.plan || Boolean(user.isSubscribed) !== entitled) {
         try {
-          await upsertSubscriptionState(userEmail, normalizedSubscription);
+          await upsertSubscriptionState(userEmail, subscriptionCore);
         } catch (persistError) {
-          console.warn('Failed to self-heal subscription plan field:', persistError);
+          console.warn('Failed to self-heal subscription entitlement fields:', persistError);
         }
       }
 
-      const entitled = isSubscriptionEntitled(normalizedSubscription, now);
+      const subView = buildSubscriptionViewFromCore(subscriptionCore, now);
 
       const subscriptionData = {
         user: {
@@ -789,16 +751,19 @@ module.exports = (dependencies) => {
           isBanned: user.isBanned || false,
         },
         subscription: {
-          isActive: entitled,
-          status: normalizedSubscription.status,
-          plan: normalizedSubscription.plan,
-          billingMode: normalizedSubscription.billingMode,
-          startDate: normalizedSubscription.currentPeriodStart || user.createdAt || null,
-          endDate: normalizedSubscription.currentPeriodEnd || null,
-          customerId: normalizedSubscription.stripeCustomerId,
-          subscriptionId: normalizedSubscription.stripeSubscriptionId,
-          cancelAtPeriodEnd: normalizedSubscription.cancelAtPeriodEnd,
-          gracePeriodEndsAt: normalizedSubscription.gracePeriodEndsAt,
+          isActive: subView.isActive,
+          status: subView.status,
+          plan: subView.plan,
+          billingMode: subView.billingMode,
+          startDate: subView.currentPeriodStart || user.createdAt || null,
+          endDate: subView.currentPeriodEnd || null,
+          customerId: subView.stripeCustomerId,
+          subscriptionId: subView.stripeSubscriptionId,
+          cancelAtPeriodEnd: subView.cancelAtPeriodEnd,
+          gracePeriodEndsAt: subView.gracePeriodEndsAt,
+          isScheduledForCancellation: subView.isScheduledForCancellation,
+          scheduledCancellationEffectiveAt: subView.scheduledCancellationEffectiveAt,
+          cancellationMessage: subView.cancellationMessage,
         },
         usage: {
           totalSessions,
@@ -934,20 +899,14 @@ module.exports = (dependencies) => {
       };
       const result = await subscriptionStorage.insertOne(logEntry);
       if (type === 'purchase' && metadata?.source === 'trusted_webhook') {
-        const trustedSubscription = normalizeSubscription(user);
-        await usersStorage.updateOne({ userEmail }, {
-          $set: {
-            isSubscribed: true,
-            subscription: {
-              ...trustedSubscription,
-              status: 'active',
-              plan: 'premium',
-              isActive: true,
-              updatedAt: new Date(),
-            },
-            updatedAt: new Date(),
-          },
-        });
+        const trustedSubscription = parseSubscriptionFields(user);
+        const nextTrusted = {
+          ...trustedSubscription,
+          status: 'active',
+          plan: 'premium',
+          gracePeriodEndsAt: null,
+        };
+        await upsertSubscriptionState(userEmail, nextTrusted);
       }
       await auditLogger.logAudit({
         action: 'CREATE_PURCHASE_LOG',
@@ -988,9 +947,42 @@ module.exports = (dependencies) => {
       if (!user) {
         return res.status(404).json({ error: 'User not found' });
       }
-      const currentSubscription = normalizeSubscription(user);
+      const currentSubscription = parseSubscriptionFields(user);
       if (!isSubscriptionEntitled(currentSubscription)) {
         return res.status(400).json({ error: 'No active subscription to cancel' });
+      }
+
+      if (
+        currentSubscription.billingMode === 'auto_renew' &&
+        currentSubscription.stripeSubscriptionId &&
+        currentSubscription.cancelAtPeriodEnd
+      ) {
+        const stripeLive = await stripe.subscriptions.retrieve(currentSubscription.stripeSubscriptionId);
+        if (stripeLive.cancel_at_period_end) {
+          const synced = {
+            ...currentSubscription,
+            status: stripeLive.status || currentSubscription.status,
+            currentPeriodStart: stripeLive.current_period_start
+              ? new Date(stripeLive.current_period_start * 1000)
+              : currentSubscription.currentPeriodStart,
+            currentPeriodEnd: stripeLive.current_period_end
+              ? new Date(stripeLive.current_period_end * 1000)
+              : currentSubscription.currentPeriodEnd,
+            cancelAtPeriodEnd: true,
+          };
+          await upsertSubscriptionState(userEmail, synced);
+          return res.json({
+            success: true,
+            alreadyScheduled: true,
+            message:
+              synced.currentPeriodEnd
+                ? 'Your subscription is already set to end at the close of the current billing period.'
+                : 'Your subscription cancellation is already scheduled.',
+            cancellationDate: user.subscriptionCancelledAt || new Date(),
+            effectiveEndDate: synced.currentPeriodEnd,
+            refundEligible: false,
+          });
+        }
       }
 
       let nextSubscription = {
@@ -1005,6 +997,9 @@ module.exports = (dependencies) => {
         nextSubscription = {
           ...nextSubscription,
           status: stripeSubscription.status || nextSubscription.status,
+          currentPeriodStart: stripeSubscription.current_period_start
+            ? new Date(stripeSubscription.current_period_start * 1000)
+            : nextSubscription.currentPeriodStart,
           currentPeriodEnd: stripeSubscription.current_period_end
             ? new Date(stripeSubscription.current_period_end * 1000)
             : nextSubscription.currentPeriodEnd,
@@ -1022,21 +1017,24 @@ module.exports = (dependencies) => {
         };
       }
 
-      const entitlementAfterCancel = isSubscriptionEntitled(nextSubscription);
       const cancellationTarget = nextSubscription.stripeSubscriptionId || 'legacy_one_time';
-
-      const updateData = {
-        isSubscribed: entitlementAfterCancel,
-        subscription: {
-          ...nextSubscription,
-          updatedAt: new Date(),
-        },
-        subscriptionCancelledAt: new Date(),
+      const cancelTime = new Date();
+      await upsertSubscriptionState(userEmail, nextSubscription);
+      const cancelMeta = {
+        subscriptionCancelledAt: cancelTime,
         subscriptionCancelReason: reason || 'User requested cancellation',
         subscriptionCancelFeedback: feedback || null,
-        updatedAt: new Date(),
+        updatedAt: cancelTime,
       };
-      await usersStorage.updateOne({ userEmail }, { $set: updateData });
+      await usersStorage.updateOne({ userEmail }, { $set: cancelMeta });
+      const updateData = {
+        ...cancelMeta,
+        isSubscribed: isSubscriptionEntitled(nextSubscription, cancelTime),
+        subscription: {
+          ...prepareSubscriptionForStore(nextSubscription, cancelTime),
+          updatedAt: cancelTime,
+        },
+      };
       // Add cancellation log to subscriptionStorage (idempotent)
       const subscriptionCancelKey = `${userEmail}:${cancellationTarget}:${
         nextSubscription.currentPeriodEnd ? new Date(nextSubscription.currentPeriodEnd).toISOString() : 'na'
@@ -1058,7 +1056,7 @@ module.exports = (dependencies) => {
         feedback: feedback || null,
         metadata: {
           ...userInfo,
-          previousPlan: isUserPro(user) ? 'premium' : 'free',
+          previousPlan: getUserProStatus(user) ? 'premium' : 'free',
           idempotencyKey: subscriptionCancelKey,
           stripeSubscriptionId: nextSubscription.stripeSubscriptionId,
         },
@@ -1081,7 +1079,8 @@ module.exports = (dependencies) => {
         userEmail: userEmail,
         role: user.role || 'user',
         oldData: {
-          isSubscribed: isUserPro(user),
+          isSubscribed: Boolean(user.isSubscribed),
+          subscription: parseSubscriptionFields(user),
         },
         newData: updateData,
         metadata: {
@@ -1117,28 +1116,58 @@ module.exports = (dependencies) => {
         return res.status(404).json({ error: 'User not found' });
       }
 
-      if (isUserPro(user)) {
+      const currentSubscription = parseSubscriptionFields(user);
+      const entitled = isSubscriptionEntitled(currentSubscription);
+      if (
+        entitled &&
+        ACTIVE_STATUSES.has(currentSubscription.status) &&
+        !currentSubscription.cancelAtPeriodEnd
+      ) {
         return res.status(400).json({ error: 'Subscription is already active' });
       }
-      const currentSubscription = normalizeSubscription(user);
 
-      // Update user subscription status
-      const updateData = {
-        isSubscribed: true,
-        subscription: {
-          ...currentSubscription,
+      let nextSubscription = { ...currentSubscription };
+
+      if (currentSubscription.billingMode === 'auto_renew' && currentSubscription.stripeSubscriptionId) {
+        const stripeSubscription = await stripe.subscriptions.update(currentSubscription.stripeSubscriptionId, {
+          cancel_at_period_end: false,
+        });
+        nextSubscription = {
+          ...nextSubscription,
+          status: stripeSubscription.status || nextSubscription.status,
+          currentPeriodStart: stripeSubscription.current_period_start
+            ? new Date(stripeSubscription.current_period_start * 1000)
+            : nextSubscription.currentPeriodStart,
+          currentPeriodEnd: stripeSubscription.current_period_end
+            ? new Date(stripeSubscription.current_period_end * 1000)
+            : nextSubscription.currentPeriodEnd,
+          cancelAtPeriodEnd: Boolean(stripeSubscription.cancel_at_period_end),
+          gracePeriodEndsAt: stripeSubscription.status === 'past_due' ? nextSubscription.gracePeriodEndsAt : null,
+        };
+      } else {
+        nextSubscription = {
+          ...nextSubscription,
           status: 'active',
-          plan: 'premium',
           cancelAtPeriodEnd: false,
           gracePeriodEndsAt: null,
-          currentPeriodStart: currentSubscription.currentPeriodStart || new Date(),
-          currentPeriodEnd: currentSubscription.currentPeriodEnd || calculateOneTimePeriodEnd(new Date()),
-          updatedAt: new Date(),
-        },
-        subscriptionReactivatedAt: new Date(),
-        updatedAt: new Date(),
+          currentPeriodStart: nextSubscription.currentPeriodStart || new Date(),
+          currentPeriodEnd: nextSubscription.currentPeriodEnd || calculateOneTimePeriodEnd(new Date()),
+        };
+      }
+
+      await upsertSubscriptionState(userEmail, nextSubscription);
+
+      const reactivatedAt = new Date();
+      await usersStorage.updateOne(
+        { userEmail },
+        { $set: { subscriptionReactivatedAt: reactivatedAt, updatedAt: reactivatedAt } }
+      );
+
+      const auditNewData = {
+        subscriptionReactivatedAt: reactivatedAt,
+        isSubscribed: isSubscriptionEntitled(nextSubscription, reactivatedAt),
+        subscription: prepareSubscriptionForStore(nextSubscription, reactivatedAt),
       };
-      await usersStorage.updateOne({ userEmail }, { $set: updateData });
       const reactivationLog = {
         userEmail: userEmail,
         userId: user.clerkId || userEmail,
@@ -1166,9 +1195,10 @@ module.exports = (dependencies) => {
         userEmail: userEmail,
         role: user.role || 'user',
         oldData: {
-          isSubscribed: isUserPro(user),
+          isSubscribed: Boolean(user.isSubscribed),
+          subscription: parseSubscriptionFields(user),
         },
-        newData: updateData,
+        newData: auditNewData,
         metadata: userInfo,
       });
 

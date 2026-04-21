@@ -2,7 +2,13 @@ const express = require("express")
 const { ObjectId } = require("mongodb")
 const multer = require("multer")
 const { getAdminActorFromRequest } = require("./admin-actor")
-const { enrichUserWithSubscription, getUserProStatus } = require("./subscription-status")
+const {
+  enrichUserWithSubscription,
+  getUserProStatus,
+  parseSubscriptionFields,
+  prepareSubscriptionForStore,
+  isSubscriptionEntitled,
+} = require("./subscription-status")
 const upload = multer({ storage: multer.memoryStorage() })
 const ALLOWED_ADMIN_ROLES = new Set(["owner", "admin", "support"])
 
@@ -40,64 +46,64 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
 
   router.post("/store-user", async (req, res) => {
     try {
-      const { userEmail, userName, userImage, isSubscribed, role, clerkId } = req.body
+      const { userEmail, userName, userImage, role, clerkId } = req.body
       const userInfo = getUserInfoFromRequest(req)
       const existingUser = await usersStorage.findOne({ userEmail })
       if (existingUser) {
-        const oldData = { ...existingUser }
-        const subscriptionActive = Boolean(isSubscribed)
-        const updateData = {
-          clerkId,
-          userName,
-          userImage,
-          isSubscribed,
-          subscription: {
-            ...(existingUser.subscription || {}),
-            isActive: subscriptionActive,
-            status: subscriptionActive ? "active" : "inactive",
-            plan: subscriptionActive ? "premium" : "free",
-            billingMode: (existingUser.subscription && existingUser.subscription.billingMode) || "auto_renew",
-            updatedAt: new Date(),
-          },
-          role,
-          updatedAt: new Date(),
+        const updateData = { updatedAt: new Date() }
+        if (clerkId !== undefined) updateData.clerkId = clerkId
+        if (userName !== undefined) updateData.userName = userName
+        if (userImage !== undefined) updateData.userImage = userImage
+        if (role !== undefined) updateData.role = role
+
+        const oldProfile = {
+          clerkId: existingUser.clerkId,
+          userName: existingUser.userName,
+          userImage: existingUser.userImage,
+          role: existingUser.role,
         }
         const result = await usersStorage.updateOne({ userEmail }, { $set: updateData })
-        // Log audit for user update
         await auditLogger.logAudit({
           action: "UPDATE",
           resource: "user",
           resourceId: existingUser._id.toString(),
           userId: userEmail,
           userEmail,
-          role: role || existingUser.role || "user",
-          oldData,
+          role: role !== undefined ? role : existingUser.role || "user",
+          oldData: oldProfile,
           newData: updateData,
           ...userInfo,
         })
         res.json({ updated: true, result })
       } else {
-        const subscriptionActive = Boolean(isSubscribed)
+        const now = new Date()
+        const subscriptionCore = {
+          status: "inactive",
+          billingMode: "auto_renew",
+          stripeCustomerId: null,
+          stripeSubscriptionId: null,
+          currentPeriodStart: null,
+          currentPeriodEnd: null,
+          cancelAtPeriodEnd: false,
+          gracePeriodEndsAt: null,
+        }
+        const subscriptionStored = prepareSubscriptionForStore(subscriptionCore, now)
         const userData = {
           userEmail,
           userName,
           userImage,
-          isSubscribed: isSubscribed || false,
+          isSubscribed: isSubscriptionEntitled(subscriptionStored, now),
           subscription: {
-            isActive: subscriptionActive,
-            status: subscriptionActive ? "active" : "inactive",
-            plan: subscriptionActive ? "premium" : "free",
-            billingMode: "auto_renew",
-            updatedAt: new Date(),
+            ...subscriptionStored,
+            updatedAt: now,
           },
           role: role || "user",
-          createdAt: new Date(),
-          updatedAt: new Date(),
+          createdAt: now,
+          updatedAt: now,
           clerkId,
         }
         const welcomeEmailResult = await emailTriggers.triggerWelcomeEmail(userData)
         const result = await usersStorage.insertOne(userData)
-        // Log audit for user creation
         await auditLogger.logAudit({
           action: "CREATE",
           resource: "user",
@@ -177,15 +183,24 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
       }
       if (role !== undefined) updateData.role = role
       if (isSubscribed !== undefined) {
-        const subscriptionActive = Boolean(isSubscribed)
-        updateData.isSubscribed = subscriptionActive
+        const now = new Date()
+        const core = parseSubscriptionFields(existingUser)
+        if (Boolean(isSubscribed)) {
+          core.status = "active"
+          core.cancelAtPeriodEnd = false
+          core.gracePeriodEndsAt = null
+          core.currentPeriodStart = core.currentPeriodStart || now
+          core.billingMode = core.billingMode || "auto_renew"
+        } else {
+          core.status = "inactive"
+          core.cancelAtPeriodEnd = false
+          core.gracePeriodEndsAt = null
+        }
+        const stored = prepareSubscriptionForStore(core, now)
+        updateData.isSubscribed = isSubscriptionEntitled(stored, now)
         updateData.subscription = {
-          ...(existingUser.subscription || {}),
-          isActive: subscriptionActive,
-          status: subscriptionActive ? "active" : "inactive",
-          plan: subscriptionActive ? "premium" : "free",
-          billingMode: (existingUser.subscription && existingUser.subscription.billingMode) || "auto_renew",
-          updatedAt: new Date(),
+          ...stored,
+          updatedAt: now,
         }
       }
       if (isBanned !== undefined) updateData.isBanned = isBanned

@@ -1,38 +1,13 @@
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const SUBSCRIPTION_GRACE_DAYS = Number.parseInt(process.env.SUBSCRIPTION_GRACE_DAYS || '3', 10);
 const ONE_TIME_SUBSCRIPTION_DAYS = Number.parseInt(process.env.ONE_TIME_SUBSCRIPTION_DAYS || '30', 10);
-const ACTIVE_STATUSES = new Set(['active', 'trialing']);
-const TERMINAL_STATUSES = new Set([
-  'canceled',
-  'unpaid',
-  'incomplete_expired',
-  'paused',
-  'inactive',
-]);
+const {
+  parseSubscriptionFields,
+  isSubscriptionEntitled,
+  prepareSubscriptionForStore,
+} = require('./subscription-status');
 
-const derivePlanFromStatus = (status) => {
-  if (!status) return 'free';
-  if (ACTIVE_STATUSES.has(status) || status === 'past_due') return 'premium';
-  if (TERMINAL_STATUSES.has(status)) return 'free';
-  return 'free';
-};
-
-const normalizeSubscription = (user) => {
-  const subscription = user?.subscription || {};
-  const status = subscription.status || 'inactive';
-
-  return {
-    status,
-    plan: subscription.plan || (status === 'active' ? 'premium' : 'free'),
-    billingMode: subscription.billingMode || 'auto_renew',
-    stripeCustomerId: subscription.stripeCustomerId || null,
-    stripeSubscriptionId: subscription.stripeSubscriptionId || null,
-    currentPeriodStart: subscription.currentPeriodStart ? new Date(subscription.currentPeriodStart) : null,
-    currentPeriodEnd: subscription.currentPeriodEnd ? new Date(subscription.currentPeriodEnd) : null,
-    cancelAtPeriodEnd: Boolean(subscription.cancelAtPeriodEnd),
-    gracePeriodEndsAt: subscription.gracePeriodEndsAt ? new Date(subscription.gracePeriodEndsAt) : null,
-  };
-};
+const normalizeSubscription = (user) => parseSubscriptionFields(user);
 
 const calculateOneTimePeriodEnd = (startDate) => {
   const endDate = new Date(startDate);
@@ -40,30 +15,21 @@ const calculateOneTimePeriodEnd = (startDate) => {
   return endDate;
 };
 
-const isSubscriptionEntitled = (subscription, now = new Date()) => {
-  if (!subscription) return false;
-  if (ACTIVE_STATUSES.has(subscription.status)) return true;
-
-  if (subscription.status === 'past_due' && subscription.gracePeriodEndsAt) {
-    return now <= new Date(subscription.gracePeriodEndsAt);
-  }
-
-  return false;
-};
-
 const applyReconciledState = async ({ usersStorage, userEmail, nextSubscription }) => {
-  const entitled = isSubscriptionEntitled(nextSubscription);
+  const now = new Date();
+  const toStore = prepareSubscriptionForStore(nextSubscription, now);
+  const entitled = isSubscriptionEntitled(toStore, now);
 
   await usersStorage.updateOne(
     { userEmail },
     {
       $set: {
         subscription: {
-          ...nextSubscription,
-          updatedAt: new Date(),
+          ...toStore,
+          updatedAt: now,
         },
         isSubscribed: entitled,
-        updatedAt: new Date(),
+        updatedAt: now,
       },
     }
   );
@@ -123,7 +89,6 @@ const reconcileSingleUser = async ({ usersStorage, subscriptionStorage, auditLog
       const stripeSub = await stripe.subscriptions.retrieve(next.stripeSubscriptionId);
       const stripeStatus = stripeSub.status || next.status;
       next.status = stripeStatus;
-      next.plan = derivePlanFromStatus(next.status);
       next.billingMode = 'auto_renew';
       next.stripeCustomerId =
         stripeSub.customer && typeof stripeSub.customer === 'string' ? stripeSub.customer : next.stripeCustomerId;
@@ -147,6 +112,7 @@ const reconcileSingleUser = async ({ usersStorage, subscriptionStorage, auditLog
       } else {
         next.gracePeriodEndsAt = null;
       }
+      next.plan = prepareSubscriptionForStore(next, now).plan;
     } catch (error) {
       if (error?.code === 'resource_missing') {
         next.status = 'inactive';
@@ -159,6 +125,7 @@ const reconcileSingleUser = async ({ usersStorage, subscriptionStorage, auditLog
     }
   }
 
+  next.plan = prepareSubscriptionForStore(next, now).plan;
   const nextEntitled = isSubscriptionEntitled(next, now);
   if (!hasStateChanged(current, next, currentEntitled, nextEntitled)) {
     return { changed: false, userEmail: user.userEmail };
