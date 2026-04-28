@@ -44,8 +44,15 @@ const blogRoutes = require('./services/blogs-route');
 const subscriptionRoutes = require('./services/subscription-routes');
 const storeLocationRoutes = require('./services/store-location');
 const testimonialsRoutes = require('./services/testimonials-routes');
+const savedJobsRoutes = require('./services/saved-jobs-routes');
+const jobPassRoutes = require('./services/job-pass-routes');
+const paypalRoutes = require('./services/paypal-routes');
+const offerAnalyticsRoutes = require('./services/offer-analytics-routes');
+const pricingConfigRoutes = require('./services/pricing-config-routes');
 const { getAdminActorFromRequest } = require('./services/admin-actor');
 const { reconcileSubscriptionState } = require('./services/subscription-reconciliation');
+const { ensurePricingConfigSeeded } = require('./services/pricing-config');
+const { validatePayPalEnv } = require('./services/payment-providers/paypal-provider');
 
 const validateStripeEnv = () => {
   const missing = [];
@@ -79,7 +86,12 @@ app.use(
   express.json({
     limit: '50mb',
     verify: (req, res, buf) => {
-      if (req.originalUrl === '/api/webhooks/stripe') {
+      // Capture raw body for any payment-provider webhook endpoint that needs to verify
+      // signatures (Stripe HMAC, PayPal verify-webhook-signature round-trip).
+      if (
+        req.originalUrl === '/api/webhooks/stripe' ||
+        req.originalUrl === '/api/webhooks/paypal'
+      ) {
         req.rawBody = buf;
       }
     },
@@ -117,6 +129,9 @@ let toolAnalyticsStorage;
 let promoStorage;
 let devTestOverrideStorage;
 let testimonialsStorage;
+let savedJobsStorage;
+let jobPassesStorage;
+let offerAnalyticsStorage;
 let emailService;
 let emailTriggers;
 let auditLogger;
@@ -124,6 +139,10 @@ let clerkClient;
 async function run() {
   try {
     validateStripeEnv();
+    // PayPal is optional at boot — if any PayPal env var is set we require the
+    // full set so we never silently launch with sandbox creds in production or
+    // miss the webhook id required for verify-webhook-signature.
+    validatePayPalEnv({ throwIfPartial: true });
 
     await client.connect();
     await client.db('admin').command({ ping: 1 });
@@ -151,6 +170,9 @@ async function run() {
     devTestOverrideStorage = client.db('Toolmate').collection('DevTestOverrides');
     storeLocationStorage = client.db('Toolmate').collection('StoreLocations');
     testimonialsStorage = client.db('Toolmate').collection('Testimonials');
+    savedJobsStorage = client.db('Toolmate').collection('SavedJobs');
+    jobPassesStorage = client.db('Toolmate').collection('JobPasses');
+    offerAnalyticsStorage = client.db('Toolmate').collection('OfferAnalytics');
 
     // Reconcile MessagesJob idempotency index. Older deployments created a unique sparse index
     // on (sessionId, clientMessageId) with the default name "sessionId_1_clientMessageId_1".
@@ -180,6 +202,45 @@ async function run() {
       console.warn('MessagesJob: could not list indexes for reconcile:', listErr?.message || listErr);
     }
 
+    /**
+     * SavedJobs.passId originally shipped as `{ unique: true, sparse: true }`.
+     * Sparse unique indexes treat explicit `null` as a present value, which
+     * causes E11000 the second time a draft job (passId: null) is inserted.
+     * We migrate to a partial unique index that only enforces uniqueness when
+     * passId is actually a string. Old deployments need the legacy index
+     * dropped first because differing options on the same key collide.
+     */
+    const ensureSavedJobsPassIdIndex = async (collection) => {
+      const DESIRED_NAME = 'savedjobs_passid_unique';
+      try {
+        const existing = await collection.indexes();
+        for (const idx of existing) {
+          const sameKey = idx?.key && Object.keys(idx.key).length === 1 && idx.key.passId === 1;
+          if (!sameKey || idx.name === DESIRED_NAME) continue;
+          try {
+            await collection.dropIndex(idx.name);
+            console.log(`SavedJobs: dropped legacy passId index "${idx.name}"`);
+          } catch (dropErr) {
+            const msg = String(dropErr?.message || '');
+            const ignorable = dropErr?.codeName === 'IndexNotFound' || dropErr?.code === 203 || /index not found/i.test(msg);
+            if (!ignorable) {
+              console.warn(`SavedJobs: failed to drop legacy passId index "${idx.name}":`, msg || dropErr);
+            }
+          }
+        }
+      } catch (listErr) {
+        console.warn('SavedJobs: could not list indexes:', listErr?.message || listErr);
+      }
+      return collection.createIndex(
+        { passId: 1 },
+        {
+          unique: true,
+          name: DESIRED_NAME,
+          partialFilterExpression: { passId: { $type: 'string' } },
+        },
+      );
+    };
+
     const createMessagesJobUniqueIndex = async () => {
       try {
         await messagesJobStorage.createIndex(
@@ -202,6 +263,67 @@ async function run() {
       }
     };
 
+    const ensureJobPassLedgerIndexes = async () => {
+      const desiredIndexes = [
+        {
+          key: { paymentProvider: 1, providerOrderId: 1 },
+          options: {
+            unique: true,
+            name: 'pass_provider_order_unique',
+            partialFilterExpression: {
+              paymentProvider: { $type: 'string' },
+              providerOrderId: { $type: 'string' },
+            },
+          },
+        },
+        {
+          key: { paymentProvider: 1, providerPaymentId: 1 },
+          options: {
+            unique: true,
+            name: 'pass_provider_payment_unique',
+            partialFilterExpression: {
+              paymentProvider: { $type: 'string' },
+              providerPaymentId: { $type: 'string' },
+            },
+          },
+        },
+      ];
+
+      let indexes = [];
+      try {
+        indexes = await jobPassesStorage.indexes();
+      } catch (listErr) {
+        console.warn('JobPasses: could not list indexes:', listErr?.message || listErr);
+      }
+
+      for (const desired of desiredIndexes) {
+        const existing = indexes.find((idx) => idx.name === desired.options.name);
+        const currentPartial = JSON.stringify(existing?.partialFilterExpression || null);
+        const desiredPartial = JSON.stringify(desired.options.partialFilterExpression);
+        const needsReplace =
+          existing && (
+            !existing.unique ||
+            existing.sparse ||
+            currentPartial !== desiredPartial
+          );
+
+        if (needsReplace) {
+          try {
+            await jobPassesStorage.dropIndex(desired.options.name);
+            console.log(`JobPasses: dropped legacy index "${desired.options.name}"`);
+          } catch (dropErr) {
+            const msg = String(dropErr?.message || '');
+            const ignorable = dropErr?.codeName === 'IndexNotFound' || dropErr?.code === 27 || /index not found/i.test(msg);
+            if (!ignorable) {
+              throw dropErr;
+            }
+          }
+        }
+
+        await jobPassesStorage.createIndex(desired.key, desired.options);
+      }
+    };
+
     await Promise.all([
       sessionsStorage.createIndex({ timestamp: -1, sessionId: 1, userEmail: 1 }),
       sessionsStorage.createIndex({ sessionId: 1, userEmail: 1 }),
@@ -220,7 +342,40 @@ async function run() {
       mateyChatSessionsStorage.createIndex({ sessionId: 1 }, { unique: true }),
       mateyChatSessionsStorage.createIndex({ userId: 1, lastMessageAt: -1 }),
       mateyChatSessionsStorage.createIndex({ userEmail: 1, lastMessageAt: -1 }),
+      // Saved Jobs indexes — list view, source-session lookup, single-pass binding.
+      savedJobsStorage.createIndex({ jobId: 1 }, { unique: true }),
+      savedJobsStorage.createIndex({ userId: 1, updatedAt: -1 }),
+      savedJobsStorage.createIndex({ userEmail: 1, updatedAt: -1 }),
+      savedJobsStorage.createIndex({ sourceSessionId: 1 }),
+      // partialFilterExpression so multiple draft jobs (passId: null) are allowed
+      // while still guaranteeing one Job Pass binds to at most one saved job.
+      // A plain `sparse: true` index is NOT enough — it treats explicit `null`
+      // as present and triggers E11000 on the second draft save.
+      ensureSavedJobsPassIdIndex(savedJobsStorage),
+      savedJobsStorage.createIndex({ lockState: 1, userId: 1 }),
+      // Job Passes — purchase ledger. Provider-agnostic uniqueness so Stripe and
+      // PayPal share one collection and webhook-replay is safe.
+      jobPassesStorage.createIndex({ passId: 1 }, { unique: true }),
+      ensureJobPassLedgerIndexes(),
+      jobPassesStorage.createIndex({ userId: 1, status: 1 }),
+      jobPassesStorage.createIndex({ userEmail: 1, status: 1 }),
+      jobPassesStorage.createIndex({ status: 1, packRemaining: 1 }),
+      // Offer analytics — funnel queries.
+      offerAnalyticsStorage.createIndex({ eventName: 1, createdAt: -1 }),
+      offerAnalyticsStorage.createIndex({ userId: 1, createdAt: -1 }),
+      offerAnalyticsStorage.createIndex({ jobId: 1, createdAt: -1 }),
+      offerAnalyticsStorage.createIndex({ paymentProvider: 1, createdAt: -1 }),
+      offerAnalyticsStorage.createIndex({ variant: 1, createdAt: -1 }),
+      offerAnalyticsStorage.createIndex({ triggerReason: 1, createdAt: -1 }),
+      promoStorage.createIndex({ offerKey: 1 }, { unique: true }),
     ]);
+    // Seed (or no-op) the Job Pass pricing config so admin/pricing-config and the
+    // public /pricing/job-pass endpoint always have something to read.
+    try {
+      await ensurePricingConfigSeeded(promoStorage);
+    } catch (seedErr) {
+      console.warn('Pricing config seed skipped:', seedErr?.message || seedErr);
+    }
     emailService = new EmailService(emailLogsStorage);
     emailTriggers = new EmailTriggers(emailService);
     auditLogger = new AuditLogger(auditLogsStorage);
@@ -627,6 +782,9 @@ async function run() {
       storeLocationStorage,
       notifyActiveSessionsChanged,
       io,
+      savedJobsStorage,
+      jobPassesStorage,
+      offerAnalyticsStorage,
     };
     app.get('/', (req, res) => {
       res.send('Welcome to Toolmate');
@@ -649,6 +807,11 @@ async function run() {
     app.use('/', blogRoutes(routeDependencies));
     app.use('/', storeLocationRoutes(routeDependencies));
     app.use('/', testimonialsRoutes(routeDependencies));
+    app.use('/', savedJobsRoutes(routeDependencies));
+    app.use('/', jobPassRoutes(routeDependencies));
+    app.use('/', paypalRoutes(routeDependencies));
+    app.use('/', offerAnalyticsRoutes(routeDependencies));
+    app.use('/', pricingConfigRoutes(routeDependencies));
     app.use((req, res) => {
       res.status(404).send({ error: 'Not Found' });
     });

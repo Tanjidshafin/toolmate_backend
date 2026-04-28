@@ -14,6 +14,8 @@ const {
   buildSubscriptionViewFromCore,
   getUserProStatus,
 } = require('./subscription-status');
+const stripeProvider = require('./payment-providers/stripe-provider');
+const { bindPassToJob } = require('./job-pass-bind');
 
 const isUserPro = getUserProStatus;
 
@@ -43,6 +45,10 @@ module.exports = (dependencies) => {
     messagesStorage,
     shedToolsStorage,
     subscriptionStorage,
+    mongoClient,
+    jobPassesStorage,
+    savedJobsStorage,
+    offerAnalyticsStorage,
   } = dependencies;
 
   const router = express.Router();
@@ -568,6 +574,43 @@ module.exports = (dependencies) => {
       switch (event.type) {
         case 'checkout.session.completed': {
           const checkoutSession = event.data.object;
+          // Job Pass one-off purchases share the Stripe webhook with Best Mates
+          // subscriptions. Route them through the provider-agnostic binder so a
+          // duplicate webhook (or replay after the success page already ran the
+          // recovery path) cannot create a second pass row.
+          const parsedJobPass = stripeProvider.parseCompletedCheckout(checkoutSession);
+          if (parsedJobPass) {
+            try {
+              await bindPassToJob({
+                mongoClient,
+                jobPassesStorage,
+                savedJobsStorage,
+                offerAnalyticsStorage,
+                auditLogger,
+                parsedEvent: parsedJobPass,
+                rawEvent: { stripeEventId: event.id, type: event.type },
+              });
+            } catch (bindErr) {
+              console.error('Job Pass bind via Stripe webhook failed:', bindErr?.message || bindErr);
+              if (offerAnalyticsStorage) {
+                try {
+                  await offerAnalyticsStorage.insertOne({
+                    eventName: 'job_pass_binding_failed',
+                    paymentProvider: 'stripe',
+                    providerOrderId: parsedJobPass.providerOrderId,
+                    providerPaymentId: parsedJobPass.providerPaymentId,
+                    jobId: parsedJobPass.jobId,
+                    userEmail: parsedJobPass.userEmail,
+                    reason: bindErr?.message || String(bindErr),
+                    createdAt: new Date(),
+                  });
+                } catch (logErr) {
+                  console.warn('Failed to log job_pass_binding_failed:', logErr?.message || logErr);
+                }
+              }
+            }
+            break;
+          }
           await syncCheckoutSessionToUser(checkoutSession, 'webhook_checkout_completed');
           break;
         }
