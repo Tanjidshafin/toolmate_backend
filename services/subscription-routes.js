@@ -420,6 +420,40 @@ module.exports = (dependencies) => {
     return { dateFilter, previousPeriodFilter };
   };
 
+  const getRevenueRange = (period, startDate, endDate) => {
+    const now = new Date();
+
+    if (startDate && endDate) {
+      const start = new Date(startDate);
+      const end = new Date(endDate);
+
+      if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+        throw new Error('Invalid date range provided');
+      }
+
+      return { start, end };
+    }
+
+    switch (period) {
+      case '24h':
+      case 'hourly':
+        return { start: new Date(now.getTime() - 24 * 60 * 60 * 1000), end: now };
+      case '7d':
+      case 'daily':
+        return { start: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000), end: now };
+      case '30d':
+      case 'monthly':
+        return { start: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000), end: now };
+      case '90d':
+        return { start: new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000), end: now };
+      case '1y':
+      case 'yearly':
+        return { start: new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000), end: now };
+      default:
+        return { start: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000), end: now };
+    }
+  };
+
   // Create Stripe Checkout Session
   router.post('/api/create-checkout-session', async (req, res) => {
     try {
@@ -549,6 +583,212 @@ module.exports = (dependencies) => {
     } catch (error) {
       console.error('checkout verify error:', error);
       return res.status(500).json({ error: 'Failed to verify checkout session' });
+    }
+  });
+
+  router.get('/api/admin/analytics/job-pass-revenue', async (req, res) => {
+    try {
+      const { period = '30d', breakdown = 'daily', startDate, endDate } = req.query;
+      const { start, end } = getRevenueRange(period, startDate, endDate);
+
+      let groupBy = {};
+      if (period === '24h' || period === 'hourly' || (breakdown === 'hourly' && (period === '7d' || period === '24h'))) {
+        groupBy = {
+          year: { $year: '$purchaseDate' },
+          month: { $month: '$purchaseDate' },
+          day: { $dayOfMonth: '$purchaseDate' },
+          hour: { $hour: '$purchaseDate' },
+        };
+      } else if (breakdown === 'weekly' || period === '90d' || period === '1y' || period === 'yearly') {
+        groupBy = {
+          year: { $year: '$purchaseDate' },
+          week: { $week: '$purchaseDate' },
+        };
+      } else if (breakdown === 'monthly' || period === 'monthly') {
+        groupBy = {
+          year: { $year: '$purchaseDate' },
+          month: { $month: '$purchaseDate' },
+        };
+      } else {
+        groupBy = {
+          year: { $year: '$purchaseDate' },
+          month: { $month: '$purchaseDate' },
+          day: { $dayOfMonth: '$purchaseDate' },
+        };
+      }
+
+      const addPurchaseDateStage = {
+        $addFields: {
+          purchaseDate: { $ifNull: ['$purchasedAt', '$createdAt'] },
+        },
+      };
+
+      const inRangeMatch = {
+        amountPaid: { $gt: 0 },
+        status: { $in: ['active', 'consumed'] },
+        purchaseDate: { $gte: start, $lte: end },
+      };
+
+      const [timeRows, providerRows, skuRows, statusRows, funnelRows] = await Promise.all([
+        jobPassesStorage
+          .aggregate([
+            addPurchaseDateStage,
+            { $match: inRangeMatch },
+            {
+              $group: {
+                _id: groupBy,
+                revenue: { $sum: '$amountPaid' },
+                count: { $sum: 1 },
+                users: { $addToSet: { $ifNull: ['$userEmail', '$userId'] } },
+              },
+            },
+            { $addFields: { uniqueUsers: { $size: '$users' } } },
+            { $sort: { '_id.year': 1, '_id.month': 1, '_id.day': 1, '_id.hour': 1, '_id.week': 1 } },
+          ])
+          .toArray(),
+        jobPassesStorage
+          .aggregate([
+            addPurchaseDateStage,
+            { $match: inRangeMatch },
+            {
+              $group: {
+                _id: '$paymentProvider',
+                revenue: { $sum: '$amountPaid' },
+                count: { $sum: 1 },
+                users: { $addToSet: { $ifNull: ['$userEmail', '$userId'] } },
+              },
+            },
+          ])
+          .toArray(),
+        jobPassesStorage
+          .aggregate([
+            addPurchaseDateStage,
+            { $match: inRangeMatch },
+            {
+              $group: {
+                _id: '$productSku',
+                revenue: { $sum: '$amountPaid' },
+                count: { $sum: 1 },
+                users: { $addToSet: { $ifNull: ['$userEmail', '$userId'] } },
+              },
+            },
+          ])
+          .toArray(),
+        jobPassesStorage
+          .aggregate([
+            addPurchaseDateStage,
+            { $match: { purchaseDate: { $gte: start, $lte: end } } },
+            {
+              $group: {
+                _id: '$status',
+                count: { $sum: 1 },
+                revenue: { $sum: { $cond: [{ $gt: ['$amountPaid', 0] }, '$amountPaid', 0] } },
+              },
+            },
+          ])
+          .toArray(),
+        offerAnalyticsStorage
+          ? offerAnalyticsStorage
+              .aggregate([
+                {
+                  $match: {
+                    eventName: { $in: ['job_pass_checkout_started', 'job_pass_binding_failed'] },
+                    createdAt: { $gte: start, $lte: end },
+                  },
+                },
+                { $group: { _id: '$eventName', count: { $sum: 1 } } },
+              ])
+              .toArray()
+          : Promise.resolve([]),
+      ]);
+
+      const totalRevenueMinor = timeRows.reduce((sum, row) => sum + (row.revenue || 0), 0);
+      const totalTransactions = timeRows.reduce((sum, row) => sum + (row.count || 0), 0);
+      const totalUniqueUsers = new Set(
+        timeRows.flatMap((row) => row.users || []).filter((value) => Boolean(value)),
+      ).size;
+
+      const formatBreakdownData = (rows) =>
+        rows.map((item) => {
+          let dateLabel = '';
+          if (item._id?.hour !== undefined) {
+            dateLabel = `${item._id.year}-${String(item._id.month).padStart(2, '0')}-${String(item._id.day).padStart(2, '0')} ${String(item._id.hour).padStart(2, '0')}:00`;
+          } else if (item._id?.week !== undefined) {
+            dateLabel = `${item._id.year}-W${String(item._id.week).padStart(2, '0')}`;
+          } else {
+            dateLabel = `${item._id.year}-${String(item._id.month).padStart(2, '0')}-${String(item._id.day).padStart(2, '0')}`;
+          }
+          return {
+            date: dateLabel,
+            revenue: Number(((item.revenue || 0) / 100).toFixed(2)),
+            transactions: item.count || 0,
+            uniqueUsers: item.uniqueUsers || 0,
+            averageTransaction: item.count > 0 ? Number(((item.revenue || 0) / item.count / 100).toFixed(2)) : 0,
+          };
+        });
+
+      const providerTotal = totalRevenueMinor > 0 ? totalRevenueMinor : 1;
+      const byProvider = providerRows
+        .map((row) => ({
+          provider: row._id || 'unknown',
+          revenue: Number(((row.revenue || 0) / 100).toFixed(2)),
+          transactions: row.count || 0,
+          uniqueUsers: new Set((row.users || []).filter((value) => Boolean(value))).size,
+          averageTransaction: row.count > 0 ? Number(((row.revenue || 0) / row.count / 100).toFixed(2)) : 0,
+          percentage: Number((((row.revenue || 0) / providerTotal) * 100).toFixed(1)),
+        }))
+        .sort((a, b) => b.revenue - a.revenue);
+
+      const skuTotal = totalRevenueMinor > 0 ? totalRevenueMinor : 1;
+      const bySku = skuRows
+        .map((row) => ({
+          productSku: row._id || 'unknown',
+          revenue: Number(((row.revenue || 0) / 100).toFixed(2)),
+          transactions: row.count || 0,
+          uniqueUsers: new Set((row.users || []).filter((value) => Boolean(value))).size,
+          averageTransaction: row.count > 0 ? Number(((row.revenue || 0) / row.count / 100).toFixed(2)) : 0,
+          percentage: Number((((row.revenue || 0) / skuTotal) * 100).toFixed(1)),
+        }))
+        .sort((a, b) => b.revenue - a.revenue);
+
+      const statusMap = statusRows.reduce((acc, row) => {
+        acc[row._id] = {
+          status: row._id,
+          count: row.count || 0,
+          revenue: Number(((row.revenue || 0) / 100).toFixed(2)),
+        };
+        return acc;
+      }, {});
+
+      const funnelMap = funnelRows.reduce((acc, row) => {
+        acc[row._id] = row.count || 0;
+        return acc;
+      }, {});
+
+      const completedPasses = (statusMap.active?.count || 0) + (statusMap.consumed?.count || 0);
+
+      return res.json({
+        success: true,
+        period,
+        breakdown,
+        range: { from: start.toISOString(), to: end.toISOString() },
+        summary: {
+          totalRevenue: Number((totalRevenueMinor / 100).toFixed(2)),
+          totalTransactions,
+          totalUniqueUsers,
+          averageTransaction: totalTransactions > 0 ? Number(((totalRevenueMinor / totalTransactions) / 100).toFixed(2)) : 0,
+          completedPasses,
+          checkoutStarted: funnelMap.job_pass_checkout_started || 0,
+          bindingFailures: funnelMap.job_pass_binding_failed || 0,
+        },
+        timeBreakdown: formatBreakdownData(timeRows),
+        byProvider,
+        bySku,
+        byStatus: Object.values(statusMap),
+      });
+    } catch (error) {
+      console.error('Error fetching job pass revenue analytics:', error);
+      res.status(500).json({ error: 'Failed to fetch job pass revenue analytics' });
     }
   });
 
