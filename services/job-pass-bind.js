@@ -238,6 +238,7 @@ const bindPassToJob = async ({
   mongoClient,
   jobPassesStorage,
   savedJobsStorage,
+  subscriptionStorage,
   offerAnalyticsStorage,
   auditLogger,
   parsedEvent,
@@ -308,6 +309,47 @@ const bindPassToJob = async ({
   // Post-binding analytics + audit. Soft-fail so a failed analytics insert
   // never breaks payment.
   try {
+    if (subscriptionStorage && parsedEvent.userEmail) {
+      const purchaseDisplay =
+        parsedEvent.productSku === 'job_pass_3pack' ? '3 Job Pass Pack' : 'Single Job Pass';
+      const purchaseLogKey = `job_pass_purchase:${parsedEvent.paymentProvider}:${parsedEvent.providerPaymentId}`;
+      const existingPurchaseLog = await subscriptionStorage.findOne({
+        userEmail: parsedEvent.userEmail,
+        'metadata.idempotencyKey': purchaseLogKey,
+      });
+      if (!existingPurchaseLog) {
+        const normalizedAmount =
+          typeof parsedEvent.amountPaid === 'number' ? Number((parsedEvent.amountPaid / 100).toFixed(2)) : 0;
+        await subscriptionStorage.insertOne({
+          userEmail: parsedEvent.userEmail,
+          userId: parsedEvent.userId || parsedEvent.userEmail,
+          clerkId: parsedEvent.userId || null,
+          userName: parsedEvent.userEmail,
+          type: 'job_pass_purchase',
+          description: `${purchaseDisplay} purchase completed`,
+          amount: normalizedAmount,
+          currency: (parsedEvent.currency || 'AUD').toUpperCase(),
+          status: 'completed',
+          date: new Date(),
+          createdAt: new Date(),
+          metadata: {
+            idempotencyKey: purchaseLogKey,
+            kind: 'job_pass',
+            paymentProvider: parsedEvent.paymentProvider,
+            providerOrderId: parsedEvent.providerOrderId || null,
+            providerPaymentId: parsedEvent.providerPaymentId,
+            providerPriceRef: parsedEvent.providerPriceRef || null,
+            productSku: parsedEvent.productSku || 'job_pass_single',
+            packQuantity: parsedEvent.packQuantity || 1,
+            packRemaining: result.pass?.packRemaining ?? null,
+            passId: result.pass?.passId || passId,
+            jobId: targetJobId,
+            status: result.status,
+          },
+        });
+      }
+    }
+
     if (offerAnalyticsStorage) {
       await offerAnalyticsStorage.insertOne({
         eventName:

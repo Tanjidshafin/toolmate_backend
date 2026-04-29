@@ -188,8 +188,8 @@ const createJobPassOrder = async ({ offer, userEmail, jobId, passId, origin, met
       application_context: {
         brand_name: 'Toolmate',
         user_action: 'PAY_NOW',
-        return_url: `${safeOrigin}/job-pass/success?provider=paypal&job_id=${encodeURIComponent(jobId || '')}`,
-        cancel_url: `${safeOrigin}/job-pass/cancel?provider=paypal&job_id=${encodeURIComponent(jobId || '')}`,
+        return_url: `${safeOrigin}/job-pass/success?provider=paypal&job_id=${encodeURIComponent(jobId || '')}&product_sku=${encodeURIComponent(offer.productSku || 'job_pass_single')}`,
+        cancel_url: `${safeOrigin}/job-pass/cancel?provider=paypal&job_id=${encodeURIComponent(jobId || '')}&product_sku=${encodeURIComponent(offer.productSku || 'job_pass_single')}`,
       },
     },
     {

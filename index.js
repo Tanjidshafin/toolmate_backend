@@ -50,7 +50,6 @@ const paypalRoutes = require('./services/paypal-routes');
 const offerAnalyticsRoutes = require('./services/offer-analytics-routes');
 const pricingConfigRoutes = require('./services/pricing-config-routes');
 const { getAdminActorFromRequest } = require('./services/admin-actor');
-const { reconcileSubscriptionState } = require('./services/subscription-reconciliation');
 const { ensurePricingConfigSeeded } = require('./services/pricing-config');
 const { validatePayPalEnv } = require('./services/payment-providers/paypal-provider');
 
@@ -65,21 +64,10 @@ const validateStripeEnv = () => {
     missing.push('STRIPE_WEBHOOK_SECRET');
   }
 
-  if (!(process.env.STRIPE_PRICE_ID_BEST_MATES_RECURRING || process.env.STRIPE_PRICE_ID_BEST_MATES)) {
-    missing.push('STRIPE_PRICE_ID_BEST_MATES_RECURRING (or STRIPE_PRICE_ID_BEST_MATES)');
-  }
-
   if (missing.length > 0) {
     throw new Error(`Missing required Stripe environment variables: ${missing.join(', ')}`);
   }
 };
-
-// Daily at 12:00 AM by default. Override with SUBSCRIPTION_RECONCILIATION_CRON for
-// tighter cadence (e.g. hourly `0 * * * *`) and set SUBSCRIPTION_RECONCILIATION_TIMEZONE
-// (IANA zone such as `Australia/Sydney`) if the server runs in UTC but billing is scoped
-// to a specific locale. Without a timezone the schedule uses the host's local time.
-const SUBSCRIPTION_RECONCILIATION_CRON = process.env.SUBSCRIPTION_RECONCILIATION_CRON || '0 0 * * *';
-const SUBSCRIPTION_RECONCILIATION_TIMEZONE = process.env.SUBSCRIPTION_RECONCILIATION_TIMEZONE || null;
 
 app.use(cors());
 app.use(
@@ -634,21 +622,6 @@ async function run() {
       }
     });
 
-    cron.schedule(
-      SUBSCRIPTION_RECONCILIATION_CRON,
-      async () => {
-        try {
-          const summary = await reconcileSubscriptionState({
-            usersStorage,
-            subscriptionStorage,
-            auditLogger,
-          });
-        } catch (error) {
-          console.error('Error in subscription reconciliation cron job:', error);
-        }
-      },
-      SUBSCRIPTION_RECONCILIATION_TIMEZONE ? { timezone: SUBSCRIPTION_RECONCILIATION_TIMEZONE } : undefined,
-    );
     cron.schedule('*/1 * * * *', async () => {
       try {
         const now = new Date();

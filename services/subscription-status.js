@@ -117,34 +117,19 @@ const enrichUserWithSubscription = (user) => {
 /**
  * Job-level entitlement helper. A saved job is considered unlocked when ANY
  * of these hold:
- *   - The user is on an active Best Mates subscription (cleanest way to keep
- *     existing subscribers happy without per-row migration — see plan §10).
  *   - The saved job carries `lockState=unlocked` (set at webhook bind time).
  *   - The user has at least one Job Pass with `packRemaining > 0` and the
  *     pass has not been refunded/revoked. The caller is expected to pass
  *     `activePasses` (already-fetched list) to avoid a roundtrip.
  *
  * Reasons returned, in priority order:
- *   subscription | job_pass_bound | job_pass_available | none
+ *   job_pass_bound | job_pass_available | none
  */
 const getJobEntitlement = ({ savedJob, user, activePasses = [], now = new Date() } = {}) => {
-  const subscriptionCore = parseSubscriptionFields(user);
-  const subscriptionActive = isSubscriptionEntitled(subscriptionCore, now);
-
-  if (subscriptionActive) {
-    return {
-      unlocked: true,
-      reason: 'subscription',
-      passId: null,
-      packRemaining: null,
-    };
-  }
-
   // Persisted unlock on the saved job (Job Pass, admin grant, or subscription-era unlock) is lifetime for that job.
   if (savedJob && savedJob.lockState === 'unlocked') {
     let reason = 'job_pass_bound';
     if (savedJob.unlockType === 'admin_grant') reason = 'admin_grant';
-    else if (savedJob.unlockType === 'subscription') reason = 'subscription';
     return {
       unlocked: true,
       reason,

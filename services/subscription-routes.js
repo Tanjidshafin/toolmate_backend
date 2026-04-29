@@ -43,6 +43,8 @@ module.exports = (dependencies) => {
     getUserInfoFromRequest,
     sessionsStorage,
     messagesStorage,
+    mateyChatSessionsStorage,
+    messagesJobStorage,
     shedToolsStorage,
     subscriptionStorage,
     mongoClient,
@@ -52,6 +54,90 @@ module.exports = (dependencies) => {
   } = dependencies;
 
   const router = express.Router();
+
+  const getUserIdentityFilters = (userEmail, clerkId = null) => {
+    const normalizedEmail = userEmail ? String(userEmail).toLowerCase() : null;
+    const userEmailCandidates = [userEmail, normalizedEmail].filter(Boolean);
+    const userIdCandidates = [clerkId, userEmail, normalizedEmail].filter(Boolean);
+
+    return {
+      sessionFilter: {
+        $or: [
+          { userEmail: { $in: userEmailCandidates } },
+          { userId: { $in: userIdCandidates } },
+        ],
+      },
+      messageFilter: {
+        $or: [
+          { userEmail: { $in: userEmailCandidates } },
+          { userId: { $in: userIdCandidates } },
+        ],
+      },
+      savedJobFilter: {
+        deletedAt: { $in: [null, undefined] },
+        $or: [
+          { userEmail: { $in: userEmailCandidates } },
+          { userId: { $in: userIdCandidates } },
+        ],
+      },
+      shedFilter: {
+        collection: { $ne: 'shed_analytics' },
+        user_id: { $in: userIdCandidates },
+      },
+    };
+  };
+
+  const formatPurchaseDisplay = (metadata = {}) => {
+    const isJobPass = metadata.kind === 'job_pass' || Boolean(metadata.productSku);
+    const productSku = metadata.productSku || null;
+    const packQuantity = Number(metadata.packQuantity || 0) || (productSku === 'job_pass_3pack' ? 3 : 1);
+    const displayName = isJobPass
+      ? productSku === 'job_pass_3pack'
+        ? '3 Job Pass Pack'
+        : 'Single Job Pass'
+      : metadata.plan || 'Best Mates';
+
+    return {
+      purchaseKind: isJobPass ? 'job_pass' : 'subscription',
+      displayName,
+      packQuantity: isJobPass ? packQuantity : null,
+    };
+  };
+
+  const calculateUsageMetrics = async ({ userEmail, clerkId }) => {
+    const filters = getUserIdentityFilters(userEmail, clerkId);
+    const [totalJobSession, totalMessages, totalSavedJob, totalSheds, suggestedToolsAgg, lastSession] = await Promise.all([
+      mateyChatSessionsStorage
+        ? mateyChatSessionsStorage.countDocuments({
+            ...filters.sessionFilter,
+            messageCount: { $gt: 0 },
+          })
+        : 0,
+      messagesJobStorage ? messagesJobStorage.countDocuments(filters.messageFilter) : 0,
+      savedJobsStorage ? savedJobsStorage.countDocuments(filters.savedJobFilter) : 0,
+      shedToolsStorage ? shedToolsStorage.countDocuments(filters.shedFilter) : 0,
+      mateyChatSessionsStorage
+        ? mateyChatSessionsStorage
+            .aggregate([
+              { $match: filters.sessionFilter },
+              { $group: { _id: null, totalSuggestedTools: { $sum: { $ifNull: ['$totalSuggestedTools', 0] } } } },
+            ])
+            .toArray()
+        : [],
+      mateyChatSessionsStorage
+        ? mateyChatSessionsStorage.findOne(filters.sessionFilter, { sort: { lastMessageAt: -1, updatedAt: -1, createdAt: -1 } })
+        : null,
+    ]);
+
+    return {
+      totalJobSession,
+      totalSavedJob,
+      totalMessages,
+      totalSheds,
+      totalSuggestedTools: suggestedToolsAgg?.[0]?.totalSuggestedTools || 0,
+      lastActivity: lastSession?.lastMessageAt || lastSession?.updatedAt || lastSession?.createdAt || null,
+    };
+  };
 
   const upsertSubscriptionState = async (userEmail, nextSubscription) => {
     const now = new Date();
@@ -449,6 +535,8 @@ module.exports = (dependencies) => {
       case '1y':
       case 'yearly':
         return { start: new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000), end: now };
+      case 'all':
+        return { start: new Date(0), end: now };
       default:
         return { start: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000), end: now };
     }
@@ -457,76 +545,9 @@ module.exports = (dependencies) => {
   // Create Stripe Checkout Session
   router.post('/api/create-checkout-session', async (req, res) => {
     try {
-      const { userEmail, plan, amount, billingMode } = req.body;
-      if (!userEmail || !plan || !amount) {
-        return res.status(400).json({ error: 'Missing required fields' });
-      }
-
-      if (billingMode === 'one_time') {
-        return res.status(400).json({ error: 'One-time payments are no longer available. Please use auto-renew.' });
-      }
-
-      const selectedBillingMode = 'auto_renew';
-      const selectedPriceId = getBillingPriceId();
-      if (!selectedPriceId) {
-        return res.status(500).json({ error: `Missing Stripe price ID for billing mode: ${selectedBillingMode}` });
-      }
-
-      const user = await usersStorage.findOne({ userEmail });
-      if (!user) {
-        return res.status(404).json({ error: 'User not found' });
-      }
-
-      const origin = getSafeOrigin(req);
-
-      const session = await stripe.checkout.sessions.create({
-        payment_method_types: ['card'],
-        line_items: [
-          {
-            price: selectedPriceId,
-            quantity: 1,
-          },
-        ],
-        mode: 'subscription',
-        success_url: `${origin}/success?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${origin}/cancel?session_id={CHECKOUT_SESSION_ID}`,
-        customer_email: userEmail,
-        metadata: {
-          userEmail: userEmail,
-          plan: plan,
-          amount: amount.toString(),
-          billingMode: selectedBillingMode,
-        },
+      return res.status(410).json({
+        error: 'Subscription checkout has been removed. Please use Job Pass checkout.',
       });
-
-      await insertLogIfMissing({
-        dedupeQuery: {
-          userEmail: userEmail,
-          'metadata.stripeSessionId': session.id,
-          status: 'pending',
-        },
-        logEntry: {
-        userEmail: userEmail,
-        userId: user.clerkId || userEmail,
-        clerkId: user.clerkId,
-        userName: user.userName,
-        type: 'pending',
-        description: `${plan} Subscription - Payment Pending`,
-        amount: amount,
-        currency: 'AUD',
-        status: 'pending',
-        date: new Date(),
-        createdAt: new Date(),
-        metadata: {
-          plan: plan,
-          addedBy: 'stripe_checkout',
-          stripeSessionId: session.id,
-          billingMode: selectedBillingMode,
-        },
-        },
-      });
-
-      res.json({ sessionId: session.id, url: session.url });
     } catch (error) {
       console.error('create-checkout-session error:', error);
       res.status(500).json({ error: 'Failed to create checkout session' });
@@ -558,6 +579,7 @@ module.exports = (dependencies) => {
           }
         }
 
+        const display = formatPurchaseDisplay(checkoutSession.metadata || {});
         return res.status(200).json({
           success: true,
           paid: false,
@@ -565,17 +587,24 @@ module.exports = (dependencies) => {
           paymentStatus: syncResult.paymentStatus || checkoutSession.payment_status,
           userEmail: syncResult.userEmail || checkoutSession.metadata?.userEmail || null,
           plan: checkoutSession.metadata?.plan || null,
+          purchaseKind: display.purchaseKind,
+          displayName: display.displayName,
+          packQuantity: display.packQuantity,
           billingMode: checkoutSession.metadata?.billingMode || null,
           amount: typeof checkoutSession.amount_total === 'number' ? checkoutSession.amount_total / 100 : 0,
           currency: (checkoutSession.currency || 'AUD').toUpperCase(),
         });
       }
 
+      const display = formatPurchaseDisplay(checkoutSession.metadata || {});
       return res.json({
         success: true,
         paid: true,
         userEmail: syncResult.userEmail,
         plan: syncResult.plan,
+        purchaseKind: display.purchaseKind,
+        displayName: display.displayName,
+        packQuantity: display.packQuantity,
         amount: syncResult.amount,
         currency: syncResult.currency,
         subscription: syncResult.subscription,
@@ -625,7 +654,7 @@ module.exports = (dependencies) => {
 
       const inRangeMatch = {
         amountPaid: { $gt: 0 },
-        status: { $in: ['active', 'consumed'] },
+        status: { $nin: ['refunded', 'revoked'] },
         purchaseDate: { $gte: start, $lte: end },
       };
 
@@ -722,7 +751,9 @@ module.exports = (dependencies) => {
             date: dateLabel,
             revenue: Number(((item.revenue || 0) / 100).toFixed(2)),
             transactions: item.count || 0,
+            passBuyerEvents: item.count || 0,
             uniqueUsers: item.uniqueUsers || 0,
+            uniquePassBuyers: item.uniqueUsers || 0,
             averageTransaction: item.count > 0 ? Number(((item.revenue || 0) / item.count / 100).toFixed(2)) : 0,
           };
         });
@@ -775,7 +806,9 @@ module.exports = (dependencies) => {
         summary: {
           totalRevenue: Number((totalRevenueMinor / 100).toFixed(2)),
           totalTransactions,
+          passBuyerEvents: totalTransactions,
           totalUniqueUsers,
+          uniquePassBuyers: totalUniqueUsers,
           averageTransaction: totalTransactions > 0 ? Number(((totalRevenueMinor / totalTransactions) / 100).toFixed(2)) : 0,
           completedPasses,
           checkoutStarted: funnelMap.job_pass_checkout_started || 0,
@@ -825,6 +858,7 @@ module.exports = (dependencies) => {
                 mongoClient,
                 jobPassesStorage,
                 savedJobsStorage,
+                subscriptionStorage,
                 offerAnalyticsStorage,
                 auditLogger,
                 parsedEvent: parsedJobPass,
@@ -933,62 +967,8 @@ module.exports = (dependencies) => {
           clerkUser = await clerkClient.users.getUser(user.clerkId);
         }
       } catch (clerkError) {}
-      const [totalSessions, totalMessages, toolsInShed] = await Promise.all([
-        sessionsStorage
-          ? (async () => {
-              const sessionQuery = {
-                $or: [{ userEmail: userEmail }, { userEmail: { $in: [userEmail] } }],
-              };
-              const count = await sessionsStorage.countDocuments(sessionQuery);
-              return count;
-            })()
-          : 0,
-        messagesStorage
-          ? (async () => {
-              const messageQuery = {
-                $or: [{ userEmail: userEmail }, { userEmail: { $in: [userEmail] } }],
-              };
-              const count = await messagesStorage.countDocuments(messageQuery);
-              return count;
-            })()
-          : 0,
-        shedToolsStorage
-          ? (async () => {
-              const userIdToQuery = user.clerkId || userEmail;
-              const shedQuery = {
-                user_id: userIdToQuery,
-                collection: { $ne: 'shed_analytics' },
-              };
-              const count = await shedToolsStorage.countDocuments(shedQuery);
-              const tools = await shedToolsStorage.find(shedQuery).limit(5).toArray();
-              if (count === 0 && user.clerkId) {
-                const emailQuery = {
-                  user_id: userEmail,
-                  collection: { $ne: 'shed_analytics' },
-                };
-                const emailCount = await shedToolsStorage.countDocuments(emailQuery);
-                if (emailCount > 0) {
-                  return emailCount;
-                }
-              }
-              return count;
-            })()
-          : 0,
-      ]);
-      let lastActivity = user.updatedAt;
-      try {
-        const lastSession = await sessionsStorage.findOne(
-          {
-            $or: [{ userEmail: userEmail }, { userEmail: { $in: [userEmail] } }],
-          },
-          { sort: { timestamp: -1 } }
-        );
-        if (lastSession && lastSession.timestamp) {
-          lastActivity = lastSession.timestamp;
-        }
-      } catch (error) {
-        console.log(error);
-      }
+      const usageMetrics = await calculateUsageMetrics({ userEmail, clerkId: user.clerkId });
+      const lastActivity = usageMetrics.lastActivity || user.updatedAt || null;
       const subscriptionCore = parseSubscriptionFields(user);
       const now = new Date();
 
@@ -1049,9 +1029,13 @@ module.exports = (dependencies) => {
           cancellationMessage: subView.cancellationMessage,
         },
         usage: {
-          totalSessions,
-          totalMessages,
-          toolsInShed,
+          totalSessions: usageMetrics.totalJobSession,
+          totalJobSession: usageMetrics.totalJobSession,
+          totalSavedJob: usageMetrics.totalSavedJob,
+          totalMessages: usageMetrics.totalMessages,
+          toolsInShed: usageMetrics.totalSheds,
+          totalSheds: usageMetrics.totalSheds,
+          totalSuggestedTools: usageMetrics.totalSuggestedTools,
           lastActivity,
         },
       };
@@ -1220,167 +1204,8 @@ module.exports = (dependencies) => {
 
   router.post('/api/subscription/:userEmail/cancel', async (req, res) => {
     try {
-      const { userEmail } = req.params;
-      const { reason, feedback } = req.body;
-      const userInfo = getUserInfoFromRequest(req);
-      if (!userEmail) {
-        return res.status(400).json({ error: 'User email is required' });
-      }
-      const user = await usersStorage.findOne({ userEmail });
-      if (!user) {
-        return res.status(404).json({ error: 'User not found' });
-      }
-      const currentSubscription = parseSubscriptionFields(user);
-      if (!isSubscriptionEntitled(currentSubscription)) {
-        return res.status(400).json({ error: 'No active subscription to cancel' });
-      }
-
-      if (
-        currentSubscription.billingMode === 'auto_renew' &&
-        currentSubscription.stripeSubscriptionId &&
-        currentSubscription.cancelAtPeriodEnd
-      ) {
-        const stripeLive = await stripe.subscriptions.retrieve(currentSubscription.stripeSubscriptionId);
-        if (stripeLive.cancel_at_period_end) {
-          const synced = {
-            ...currentSubscription,
-            status: stripeLive.status || currentSubscription.status,
-            currentPeriodStart: stripeLive.current_period_start
-              ? new Date(stripeLive.current_period_start * 1000)
-              : currentSubscription.currentPeriodStart,
-            currentPeriodEnd: stripeLive.current_period_end
-              ? new Date(stripeLive.current_period_end * 1000)
-              : currentSubscription.currentPeriodEnd,
-            cancelAtPeriodEnd: true,
-          };
-          await upsertSubscriptionState(userEmail, synced);
-          return res.json({
-            success: true,
-            alreadyScheduled: true,
-            message:
-              synced.currentPeriodEnd
-                ? 'Your subscription is already set to end at the close of the current billing period.'
-                : 'Your subscription cancellation is already scheduled.',
-            cancellationDate: user.subscriptionCancelledAt || new Date(),
-            effectiveEndDate: synced.currentPeriodEnd,
-            refundEligible: false,
-          });
-        }
-      }
-
-      let nextSubscription = {
-        ...currentSubscription,
-      };
-
-      if (currentSubscription.billingMode === 'auto_renew' && currentSubscription.stripeSubscriptionId) {
-        const stripeSubscription = await stripe.subscriptions.update(currentSubscription.stripeSubscriptionId, {
-          cancel_at_period_end: true,
-        });
-
-        nextSubscription = {
-          ...nextSubscription,
-          status: stripeSubscription.status || nextSubscription.status,
-          currentPeriodStart: stripeSubscription.current_period_start
-            ? new Date(stripeSubscription.current_period_start * 1000)
-            : nextSubscription.currentPeriodStart,
-          currentPeriodEnd: stripeSubscription.current_period_end
-            ? new Date(stripeSubscription.current_period_end * 1000)
-            : nextSubscription.currentPeriodEnd,
-          cancelAtPeriodEnd: true,
-          stripeCustomerId:
-            stripeSubscription.customer && typeof stripeSubscription.customer === 'string'
-              ? stripeSubscription.customer
-              : nextSubscription.stripeCustomerId,
-        };
-      } else {
-        nextSubscription = {
-          ...nextSubscription,
-          cancelAtPeriodEnd: true,
-          currentPeriodEnd: nextSubscription.currentPeriodEnd || calculateOneTimePeriodEnd(new Date()),
-        };
-      }
-
-      const cancellationTarget = nextSubscription.stripeSubscriptionId || 'legacy_one_time';
-      const cancelTime = new Date();
-      await upsertSubscriptionState(userEmail, nextSubscription);
-      const cancelMeta = {
-        subscriptionCancelledAt: cancelTime,
-        subscriptionCancelReason: reason || 'User requested cancellation',
-        subscriptionCancelFeedback: feedback || null,
-        updatedAt: cancelTime,
-      };
-      await usersStorage.updateOne({ userEmail }, { $set: cancelMeta });
-      const updateData = {
-        ...cancelMeta,
-        isSubscribed: isSubscriptionEntitled(nextSubscription, cancelTime),
-        subscription: {
-          ...prepareSubscriptionForStore(nextSubscription, cancelTime),
-          updatedAt: cancelTime,
-        },
-      };
-      // Add cancellation log to subscriptionStorage (idempotent)
-      const subscriptionCancelKey = `${userEmail}:${cancellationTarget}:${
-        nextSubscription.currentPeriodEnd ? new Date(nextSubscription.currentPeriodEnd).toISOString() : 'na'
-      }`;
-
-      const cancellationLog = {
-        userEmail: userEmail,
-        userId: user.clerkId || userEmail,
-        clerkId: user.clerkId,
-        userName: user.userName,
-        type: 'cancellation',
-        description: 'Subscription cancellation requested',
-        amount: 0,
-        currency: 'AUD',
-        status: 'subscription_cancel',
-        date: new Date(),
-        createdAt: new Date(),
-        reason: reason || 'User requested cancellation',
-        feedback: feedback || null,
-        metadata: {
-          ...userInfo,
-          previousPlan: getUserProStatus(user) ? 'premium' : 'free',
-          idempotencyKey: subscriptionCancelKey,
-          stripeSubscriptionId: nextSubscription.stripeSubscriptionId,
-        },
-      };
-
-      await insertLogIfMissing({
-        dedupeQuery: {
-          userEmail,
-          'metadata.idempotencyKey': subscriptionCancelKey,
-          status: 'subscription_cancel',
-        },
-        logEntry: cancellationLog,
-      });
-      // Log audit trail
-      await auditLogger.logAudit({
-        action: 'CANCEL_SUBSCRIPTION',
-        resource: 'subscription',
-        resourceId: user._id.toString(),
-        userId: user._id.toString(),
-        userEmail: userEmail,
-        role: user.role || 'user',
-        oldData: {
-          isSubscribed: Boolean(user.isSubscribed),
-          subscription: parseSubscriptionFields(user),
-        },
-        newData: updateData,
-        metadata: {
-          reason: reason,
-          feedback: feedback,
-          ...userInfo,
-        },
-      });
-      res.json({
-        success: true,
-        message:
-          nextSubscription.cancelAtPeriodEnd && nextSubscription.currentPeriodEnd
-            ? 'Subscription will end at the current billing period end'
-            : 'Subscription cancelled successfully',
-        cancellationDate: new Date(),
-        effectiveEndDate: nextSubscription.currentPeriodEnd,
-        refundEligible: false,
+      return res.status(410).json({
+        error: 'Subscription cancellation has been removed. Use Job Pass purchase history only.',
       });
     } catch (error) {
       res.status(500).json({ error: 'Failed to cancel subscription' });
@@ -1389,106 +1214,8 @@ module.exports = (dependencies) => {
 
   router.post('/api/subscription/:userEmail/reactivate', async (req, res) => {
     try {
-      const { userEmail } = req.params;
-      const userInfo = getUserInfoFromRequest(req);
-      if (!userEmail) {
-        return res.status(400).json({ error: 'User email is required' });
-      }
-      const user = await usersStorage.findOne({ userEmail });
-      if (!user) {
-        return res.status(404).json({ error: 'User not found' });
-      }
-
-      const currentSubscription = parseSubscriptionFields(user);
-      const entitled = isSubscriptionEntitled(currentSubscription);
-      if (
-        entitled &&
-        ACTIVE_STATUSES.has(currentSubscription.status) &&
-        !currentSubscription.cancelAtPeriodEnd
-      ) {
-        return res.status(400).json({ error: 'Subscription is already active' });
-      }
-
-      let nextSubscription = { ...currentSubscription };
-
-      if (currentSubscription.billingMode === 'auto_renew' && currentSubscription.stripeSubscriptionId) {
-        const stripeSubscription = await stripe.subscriptions.update(currentSubscription.stripeSubscriptionId, {
-          cancel_at_period_end: false,
-        });
-        nextSubscription = {
-          ...nextSubscription,
-          status: stripeSubscription.status || nextSubscription.status,
-          currentPeriodStart: stripeSubscription.current_period_start
-            ? new Date(stripeSubscription.current_period_start * 1000)
-            : nextSubscription.currentPeriodStart,
-          currentPeriodEnd: stripeSubscription.current_period_end
-            ? new Date(stripeSubscription.current_period_end * 1000)
-            : nextSubscription.currentPeriodEnd,
-          cancelAtPeriodEnd: Boolean(stripeSubscription.cancel_at_period_end),
-          gracePeriodEndsAt: stripeSubscription.status === 'past_due' ? nextSubscription.gracePeriodEndsAt : null,
-        };
-      } else {
-        nextSubscription = {
-          ...nextSubscription,
-          status: 'active',
-          cancelAtPeriodEnd: false,
-          gracePeriodEndsAt: null,
-          currentPeriodStart: nextSubscription.currentPeriodStart || new Date(),
-          currentPeriodEnd: nextSubscription.currentPeriodEnd || calculateOneTimePeriodEnd(new Date()),
-        };
-      }
-
-      await upsertSubscriptionState(userEmail, nextSubscription);
-
-      const reactivatedAt = new Date();
-      await usersStorage.updateOne(
-        { userEmail },
-        { $set: { subscriptionReactivatedAt: reactivatedAt, updatedAt: reactivatedAt } }
-      );
-
-      const auditNewData = {
-        subscriptionReactivatedAt: reactivatedAt,
-        isSubscribed: isSubscriptionEntitled(nextSubscription, reactivatedAt),
-        subscription: prepareSubscriptionForStore(nextSubscription, reactivatedAt),
-      };
-      const reactivationLog = {
-        userEmail: userEmail,
-        userId: user.clerkId || userEmail,
-        clerkId: user.clerkId,
-        userName: user.userName,
-        type: 'reactivation',
-        description: 'Subscription reactivated',
-        amount: 10,
-        currency: 'AUD',
-        status: 'completed',
-        date: new Date(),
-        createdAt: new Date(),
-        metadata: {
-          ...userInfo,
-          newPlan: 'premium',
-        },
-      };
-      await subscriptionStorage.insertOne(reactivationLog);
-      // Log audit trail
-      await auditLogger.logAudit({
-        action: 'REACTIVATE_SUBSCRIPTION',
-        resource: 'subscription',
-        resourceId: user._id.toString(),
-        userId: user._id.toString(),
-        userEmail: userEmail,
-        role: user.role || 'user',
-        oldData: {
-          isSubscribed: Boolean(user.isSubscribed),
-          subscription: parseSubscriptionFields(user),
-        },
-        newData: auditNewData,
-        metadata: userInfo,
-      });
-
-      res.json({
-        success: true,
-        message: 'Subscription reactivated successfully',
-        reactivationDate: new Date(),
+      return res.status(410).json({
+        error: 'Subscription reactivation has been removed. Use Job Pass checkout instead.',
       });
     } catch (error) {
       res.status(500).json({ error: 'Failed to reactivate subscription' });
@@ -1498,6 +1225,24 @@ module.exports = (dependencies) => {
   router.get('/api/subscription/:userEmail/usage', async (req, res) => {
     const { userEmail } = req.params;
     return res.redirect(307, `/api/subscription/${encodeURIComponent(userEmail)}/usage-details`);
+  });
+
+  // Job Pass-first customer profile compatibility contracts.
+  router.get('/api/customer-profile/:userEmail', async (req, res) => {
+    const { userEmail } = req.params;
+    return res.redirect(307, `/api/subscription/${encodeURIComponent(userEmail)}`);
+  });
+
+  router.get('/api/customer-profile/:userEmail/usage', async (req, res) => {
+    const { userEmail } = req.params;
+    return res.redirect(307, `/api/subscription/${encodeURIComponent(userEmail)}/usage-details`);
+  });
+
+  router.get('/api/customer-profile/:userEmail/billing-events', async (req, res) => {
+    const { userEmail } = req.params;
+    const queryString = new URLSearchParams(req.query || {}).toString();
+    const suffix = queryString ? `?${queryString}` : '';
+    return res.redirect(307, `/api/subscription/${encodeURIComponent(userEmail)}/purchase-logs${suffix}`);
   });
 
   router.get('/api/subscription/:userEmail/usage-details', async (req, res) => {
@@ -1510,59 +1255,29 @@ module.exports = (dependencies) => {
       if (!user) {
         return res.status(404).json({ error: 'User not found' });
       }
-      const [sessionStats, messageStats, shedStats] = await Promise.all([
-        sessionsStorage
-          ? sessionsStorage
+      const filters = getUserIdentityFilters(userEmail, user.clerkId);
+      const [usageMetrics, sessionStats, shedStats] = await Promise.all([
+        calculateUsageMetrics({ userEmail, clerkId: user.clerkId }),
+        mateyChatSessionsStorage
+          ? mateyChatSessionsStorage
               .aggregate([
-                {
-                  $match: {
-                    $or: [{ userEmail: userEmail }, { userEmail: { $in: [userEmail] } }],
-                  },
-                },
+                { $match: filters.sessionFilter },
                 {
                   $group: {
                     _id: null,
                     totalSessions: { $sum: 1 },
-                    flaggedSessions: { $sum: { $cond: ['$flagTriggered', 1, 0] } },
-                    budgetTiers: { $push: '$budgetTier' },
-                    lastSession: { $max: '$timestamp' },
-                  },
-                },
-              ])
-              .toArray()
-          : [{ totalSessions: 0, flaggedSessions: 0, budgetTiers: [], lastSession: null }],
-        messagesStorage
-          ? messagesStorage
-              .aggregate([
-                {
-                  $match: {
-                    $or: [{ userEmail: userEmail }, { userEmail: { $in: [userEmail] } }],
-                  },
-                },
-                {
-                  $project: {
-                    messageCount: { $size: { $ifNull: ['$messages', []] } },
-                  },
-                },
-                {
-                  $group: {
-                    _id: null,
-                    totalMessages: { $sum: '$messageCount' },
+                    totalMessages: { $sum: { $ifNull: ['$messageCount', 0] } },
                     totalConversations: { $sum: 1 },
+                    lastSession: { $max: '$lastMessageAt' },
                   },
                 },
               ])
               .toArray()
-          : [{ totalMessages: 0, totalConversations: 0 }],
+          : [{ totalSessions: 0, totalMessages: 0, totalConversations: 0, lastSession: null }],
         shedToolsStorage
           ? shedToolsStorage
               .aggregate([
-                {
-                  $match: {
-                    user_id: user.clerkId || userEmail,
-                    collection: { $ne: 'shed_analytics' },
-                  },
-                },
+                { $match: filters.shedFilter },
                 {
                   $group: {
                     _id: '$category',
@@ -1574,31 +1289,21 @@ module.exports = (dependencies) => {
               .toArray()
           : [],
       ]);
-      const sessionData = sessionStats[0] || {
-        totalSessions: 0,
-        flaggedSessions: 0,
-        budgetTiers: [],
-        lastSession: null,
-      };
-      const messageData = messageStats[0] || { totalMessages: 0, totalConversations: 0 };
-      const budgetTierCounts = sessionData.budgetTiers.reduce((acc, tier) => {
-        acc[tier] = (acc[tier] || 0) + 1;
-        return acc;
-      }, {});
+      const sessionData = sessionStats[0] || { totalSessions: 0, totalMessages: 0, totalConversations: 0, lastSession: null };
 
       res.json({
         sessions: {
           total: sessionData.totalSessions,
-          flagged: sessionData.flaggedSessions,
+          flagged: 0,
           lastActivity: sessionData.lastSession,
-          budgetTierDistribution: budgetTierCounts,
+          budgetTierDistribution: {},
         },
         messages: {
-          total: messageData.totalMessages,
-          conversations: messageData.totalConversations,
+          total: sessionData.totalMessages,
+          conversations: sessionData.totalConversations,
           averagePerConversation:
-            messageData.totalConversations > 0
-              ? Math.round((messageData.totalMessages / messageData.totalConversations) * 100) / 100
+            sessionData.totalConversations > 0
+              ? Math.round((sessionData.totalMessages / sessionData.totalConversations) * 100) / 100
               : 0,
         },
         shed: {
@@ -1609,6 +1314,7 @@ module.exports = (dependencies) => {
             tools: cat.tools,
           })),
         },
+        totals: usageMetrics,
       });
     } catch (error) {
       res.status(500).json({ error: 'Failed to fetch usage details' });
@@ -1900,32 +1606,7 @@ module.exports = (dependencies) => {
         .toArray();
       const usersWithStats = await Promise.all(
         users.map(async (user) => {
-          const [sessionCount, messageCount, toolCount, lastSession] = await Promise.all([
-            sessionsStorage
-              ? sessionsStorage.countDocuments({
-                  $or: [{ userEmail: user.userEmail }, { userEmail: { $in: [user.userEmail] } }],
-                })
-              : 0,
-            messagesStorage
-              ? messagesStorage.countDocuments({
-                  $or: [{ userEmail: user.userEmail }, { userEmail: { $in: [user.userEmail] } }],
-                })
-              : 0,
-            shedToolsStorage
-              ? shedToolsStorage.countDocuments({
-                  user_id: user.clerkId || user.userEmail,
-                  collection: { $ne: 'shed_analytics' },
-                })
-              : 0,
-            sessionsStorage
-              ? sessionsStorage.findOne(
-                  {
-                    $or: [{ userEmail: user.userEmail }, { userEmail: { $in: [user.userEmail] } }],
-                  },
-                  { sort: { timestamp: -1 } }
-                )
-              : null,
-          ]);
+          const usageMetrics = await calculateUsageMetrics({ userEmail: user.userEmail, clerkId: user.clerkId });
           return {
             id: user._id,
             userName: user.userName || 'Best Mates Subscription',
@@ -1937,11 +1618,13 @@ module.exports = (dependencies) => {
             role: user.role || 'user',
             isBanned: user.isBanned || false,
             createdAt: user.createdAt,
-            lastActivity: lastSession?.timestamp || user.updatedAt,
+            lastActivity: usageMetrics.lastActivity || user.updatedAt,
             usage: {
-              sessions: sessionCount,
-              messages: messageCount,
-              tools: toolCount,
+              sessions: usageMetrics.totalJobSession,
+              savedJobs: usageMetrics.totalSavedJob,
+              messages: usageMetrics.totalMessages,
+              tools: usageMetrics.totalSheds,
+              suggestedTools: usageMetrics.totalSuggestedTools,
             },
           };
         })

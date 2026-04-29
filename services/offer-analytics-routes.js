@@ -11,6 +11,7 @@
  */
 
 const express = require('express');
+const { ObjectId } = require('mongodb');
 const { getAdminActorFromRequest } = require('./admin-actor');
 
 /**
@@ -46,6 +47,25 @@ const parseDateRange = (req) => {
     return null;
   }
   return { from, to };
+};
+
+const encodeCursor = (payload) => Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+const toCursorTs = (value) => {
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? new Date(0).toISOString() : date.toISOString();
+};
+
+const decodeCursor = (cursor) => {
+  try {
+    if (!cursor) return null;
+    const parsed = JSON.parse(Buffer.from(String(cursor), 'base64url').toString('utf8'));
+    if (!parsed || !parsed.ts || !parsed.id) return null;
+    const tsDate = new Date(parsed.ts);
+    if (Number.isNaN(tsDate.getTime())) return null;
+    return { ts: tsDate, id: new ObjectId(String(parsed.id)) };
+  } catch {
+    return null;
+  }
 };
 
 module.exports = ({ offerAnalyticsStorage, jobPassesStorage, savedJobsStorage }) => {
@@ -183,12 +203,30 @@ module.exports = ({ offerAnalyticsStorage, jobPassesStorage, savedJobsStorage })
       if (req.query?.paymentProvider) filter.paymentProvider = String(req.query.paymentProvider);
       if (req.query?.variant) filter.variant = String(req.query.variant);
       const limit = Math.min(Number.parseInt(req.query.limit, 10) || 100, 500);
+      const cursorValue = decodeCursor(req.query.cursor);
+      if (req.query.cursor && !cursorValue) {
+        return res.status(400).json({ error: 'Invalid cursor' });
+      }
+      if (cursorValue) {
+        filter.$or = [
+          { createdAt: { $lt: cursorValue.ts } },
+          { createdAt: cursorValue.ts, _id: { $lt: cursorValue.id } },
+        ];
+      }
       const events = await offerAnalyticsStorage
         .find(filter)
-        .sort({ createdAt: -1 })
-        .limit(limit)
+        .sort({ createdAt: -1, _id: -1 })
+        .limit(limit + 1)
         .toArray();
-      return res.json({ success: true, events });
+      const hasMore = events.length > limit;
+      const pageItems = hasMore ? events.slice(0, limit) : events;
+      const last = pageItems[pageItems.length - 1];
+      const nextCursor = hasMore && last ? encodeCursor({ ts: toCursorTs(last.createdAt), id: String(last._id) }) : null;
+      return res.json({
+        success: true,
+        events: pageItems,
+        pagination: { limit, hasMore, nextCursor },
+      });
     } catch (err) {
       console.error('GET /admin/job-pass-funnel/recent error:', err);
       return res.status(500).json({ error: 'Failed to load funnel events' });
@@ -204,8 +242,31 @@ module.exports = ({ offerAnalyticsStorage, jobPassesStorage, savedJobsStorage })
         createdAt: { $gte: range.from, $lte: range.to },
         eventName: 'job_pass_binding_failed',
       };
-      const failures = await offerAnalyticsStorage.find(filter).sort({ createdAt: -1 }).limit(200).toArray();
-      return res.json({ success: true, failures });
+      const limit = Math.min(Number.parseInt(req.query.limit, 10) || 100, 500);
+      const cursorValue = decodeCursor(req.query.cursor);
+      if (req.query.cursor && !cursorValue) {
+        return res.status(400).json({ error: 'Invalid cursor' });
+      }
+      if (cursorValue) {
+        filter.$or = [
+          { createdAt: { $lt: cursorValue.ts } },
+          { createdAt: cursorValue.ts, _id: { $lt: cursorValue.id } },
+        ];
+      }
+      const failures = await offerAnalyticsStorage
+        .find(filter)
+        .sort({ createdAt: -1, _id: -1 })
+        .limit(limit + 1)
+        .toArray();
+      const hasMore = failures.length > limit;
+      const pageItems = hasMore ? failures.slice(0, limit) : failures;
+      const last = pageItems[pageItems.length - 1];
+      const nextCursor = hasMore && last ? encodeCursor({ ts: toCursorTs(last.createdAt), id: String(last._id) }) : null;
+      return res.json({
+        success: true,
+        failures: pageItems,
+        pagination: { limit, hasMore, nextCursor },
+      });
     } catch (err) {
       console.error('GET /admin/job-pass-funnel/binding-failures error:', err);
       return res.status(500).json({ error: 'Failed to load binding failures' });
@@ -269,9 +330,34 @@ module.exports = ({ offerAnalyticsStorage, jobPassesStorage, savedJobsStorage })
       const filter = {};
       if (req.query?.lockState) filter.lockState = String(req.query.lockState);
       if (req.query?.userEmail) filter.userEmail = String(req.query.userEmail).toLowerCase();
+      if (req.query?.jobName) {
+        filter.jobName = { $regex: String(req.query.jobName), $options: 'i' };
+      }
       const limit = Math.min(Number.parseInt(req.query.limit, 10) || 50, 200);
-      const jobs = await savedJobsStorage.find(filter).sort({ updatedAt: -1 }).limit(limit).toArray();
-      return res.json({ success: true, jobs });
+      const cursorValue = decodeCursor(req.query.cursor);
+      if (req.query.cursor && !cursorValue) {
+        return res.status(400).json({ error: 'Invalid cursor' });
+      }
+      if (cursorValue) {
+        filter.$or = [
+          { updatedAt: { $lt: cursorValue.ts } },
+          { updatedAt: cursorValue.ts, _id: { $lt: cursorValue.id } },
+        ];
+      }
+      const jobs = await savedJobsStorage
+        .find(filter)
+        .sort({ updatedAt: -1, _id: -1 })
+        .limit(limit + 1)
+        .toArray();
+      const hasMore = jobs.length > limit;
+      const pageItems = hasMore ? jobs.slice(0, limit) : jobs;
+      const last = pageItems[pageItems.length - 1];
+      const nextCursor = hasMore && last ? encodeCursor({ ts: toCursorTs(last.updatedAt), id: String(last._id) }) : null;
+      return res.json({
+        success: true,
+        jobs: pageItems,
+        pagination: { limit, hasMore, nextCursor },
+      });
     } catch (err) {
       console.error('GET /admin/saved-jobs error:', err);
       return res.status(500).json({ error: 'Failed to load saved jobs' });

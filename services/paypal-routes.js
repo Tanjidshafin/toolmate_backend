@@ -26,6 +26,7 @@ const VALID_SKUS = new Set(['job_pass_single', 'job_pass_3pack']);
 
 module.exports = ({
   usersStorage,
+  subscriptionStorage,
   jobPassesStorage,
   savedJobsStorage,
   promoStorage,
@@ -35,6 +36,42 @@ module.exports = ({
 }) => {
   const router = express.Router();
   const requireAuth = createRequireAuth({ usersStorage });
+
+  const logPurchaseHistory = async ({
+    userEmail,
+    userId,
+    userName,
+    type,
+    description,
+    amount,
+    currency,
+    status,
+    metadata,
+  }) => {
+    if (!subscriptionStorage || !userEmail) return;
+    const dedupeKey = metadata?.idempotencyKey;
+    if (dedupeKey) {
+      const existing = await subscriptionStorage.findOne({
+        userEmail,
+        'metadata.idempotencyKey': dedupeKey,
+      });
+      if (existing) return;
+    }
+    await subscriptionStorage.insertOne({
+      userEmail,
+      userId: userId || userEmail,
+      clerkId: userId || null,
+      userName: userName || 'ToolMate User',
+      type,
+      description,
+      amount: amount || 0,
+      currency: (currency || 'AUD').toUpperCase(),
+      status,
+      date: new Date(),
+      createdAt: new Date(),
+      metadata: metadata || {},
+    });
+  };
 
   router.post('/api/paypal/orders', requireAuth, async (req, res) => {
     try {
@@ -118,6 +155,27 @@ module.exports = ({
         }
       }
 
+      await logPurchaseHistory({
+        userEmail: authUser.userEmail,
+        userId: authUser.userId,
+        userName: authUser.userName,
+        type: 'job_pass_checkout',
+        description: `Job Pass checkout started (${productSku === 'job_pass_3pack' ? '3 Job Pass Pack' : 'Single Job Pass'})`,
+        amount: offer.amount,
+        currency: offer.currency,
+        status: 'pending',
+        metadata: {
+          idempotencyKey: `job_pass_checkout:paypal:${order.providerOrderId}`,
+          kind: 'job_pass',
+          paymentProvider: 'paypal',
+          providerOrderId: order.providerOrderId,
+          productSku,
+          packQuantity: offer.packQuantity,
+          passId,
+          jobId,
+        },
+      });
+
       return res.json({
         success: true,
         provider: 'paypal',
@@ -168,6 +226,7 @@ module.exports = ({
         mongoClient,
         jobPassesStorage,
         savedJobsStorage,
+        subscriptionStorage,
         offerAnalyticsStorage,
         auditLogger,
         parsedEvent: { ...parsed, userId: authUser.userId },
@@ -254,6 +313,7 @@ module.exports = ({
             mongoClient,
             jobPassesStorage,
             savedJobsStorage,
+            subscriptionStorage,
             offerAnalyticsStorage,
             auditLogger,
             parsedEvent: enriched,
@@ -283,6 +343,7 @@ module.exports = ({
       if (eventType === 'PAYMENT.CAPTURE.REFUNDED' || eventType === 'PAYMENT.CAPTURE.REVERSED') {
         const captureId = event?.resource?.id || null;
         if (captureId) {
+          const existingPass = await jobPassesStorage.findOne({ paymentProvider: 'paypal', providerPaymentId: captureId });
           await jobPassesStorage.updateOne(
             { paymentProvider: 'paypal', providerPaymentId: captureId },
             {
@@ -294,6 +355,30 @@ module.exports = ({
               },
             },
           );
+          if (existingPass?.userEmail) {
+            const normalizedRefundAmount =
+              typeof existingPass.amountPaid === 'number' ? Number((existingPass.amountPaid / 100).toFixed(2)) : 0;
+            await logPurchaseHistory({
+              userEmail: existingPass.userEmail,
+              userId: existingPass.userId,
+              userName: existingPass.userEmail,
+              type: 'job_pass_refund',
+              description: 'Job pass refunded',
+              amount: normalizedRefundAmount,
+              currency: existingPass.currency || 'AUD',
+              status: 'refunded',
+              metadata: {
+                idempotencyKey: `job_pass_refund:paypal:${captureId}:${eventType}`,
+                kind: 'job_pass',
+                paymentProvider: 'paypal',
+                providerPaymentId: captureId,
+                providerOrderId: existingPass.providerOrderId || null,
+                productSku: existingPass.productSku || 'job_pass_single',
+                packQuantity: existingPass.packQuantity || 1,
+                refundReason: event?.resource?.status_details?.reason || eventType,
+              },
+            });
+          }
         }
         return res.json({ received: true });
       }
