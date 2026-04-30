@@ -1,12 +1,20 @@
 const express = require('express');
 const { ObjectId } = require('mongodb');
 
+const normalizeArray = (value) => (Array.isArray(value) ? value : []);
+const normalizeEmail = (value) =>
+  (typeof value === 'string' ? value : '')
+    .toLowerCase()
+    .trim();
+
 module.exports = ({
   feedbackStorage,
   flaggedMessagesStorage,
   auditLogger,
   getUserInfoFromRequest,
   chatLogsStorage,
+  messagesJobStorage,
+  mateyChatSessionsStorage,
 }) => {
   const router = express.Router();
   router.get('/get-feedback', async (req, res) => {
@@ -82,11 +90,12 @@ module.exports = ({
       };
       await auditLogger.logAudit(auditData);
       if (data.reportStatus && data.feedback?.reasons) {
+        const reasonList = normalizeArray(data.feedback.reasons).map((reason) => String(reason).trim()).filter(Boolean);
         const flaggedMessage = {
           messageId: data.messageId,
           messageText: data.messageText,
           messageTimestamp: new Date(data.messageTimestamp),
-          reasons: data.feedback.reasons,
+          reasons: reasonList,
           otherReason: data.feedback.otherReason || '',
           userEmail: data.email,
           isLoggedInUser: data.isLoggedInUser,
@@ -99,6 +108,58 @@ module.exports = ({
           archived: false,
         };
         const flaggedResult = await flaggedMessagesStorage.insertOne(flaggedMessage);
+        const now = new Date();
+        let resolvedSessionId = null;
+        if (messagesJobStorage && data.messageId) {
+          const messageLookupQuery = ObjectId.isValid(data.messageId)
+            ? {
+                $or: [{ _id: new ObjectId(data.messageId) }, { clientMessageId: data.messageId }],
+              }
+            : { clientMessageId: data.messageId };
+          const matchedMessage = await messagesJobStorage.findOne(messageLookupQuery);
+          if (matchedMessage) {
+            resolvedSessionId = matchedMessage.sessionId || null;
+            await messagesJobStorage.updateOne(
+              { _id: matchedMessage._id },
+              {
+                $set: {
+                  flagTriggered: true,
+                  flaggedAt: now,
+                  flagReasons: reasonList,
+                  flagStatus: 'pending',
+                  updatedAt: now,
+                },
+              }
+            );
+          }
+        }
+        if (mateyChatSessionsStorage && resolvedSessionId) {
+          await mateyChatSessionsStorage.updateOne(
+            { sessionId: resolvedSessionId },
+            {
+              $set: {
+                hasFlaggedMessages: true,
+                lastFlaggedAt: now,
+                updatedAt: now,
+              },
+            }
+          );
+          const flaggedCount = await messagesJobStorage.countDocuments({
+            sessionId: resolvedSessionId,
+            flagTriggered: true,
+          });
+          await mateyChatSessionsStorage.updateOne(
+            { sessionId: resolvedSessionId },
+            {
+              $set: {
+                flaggedMessageCount: flaggedCount,
+                hasFlaggedMessages: flaggedCount > 0,
+                lastFlaggedAt: now,
+                updatedAt: now,
+              },
+            }
+          );
+        }
         await chatLogsStorage.updateMany(
           {
             mateyResponse: data.messageText,
@@ -107,6 +168,8 @@ module.exports = ({
           {
             $set: {
               flagTriggered: true,
+              flaggedAt: now,
+              flagReasons: reasonList,
               updatedAt: new Date(),
             },
           }

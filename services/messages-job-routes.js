@@ -29,6 +29,7 @@ const normalizeRole = (role) => {
 };
 
 const normalizeArray = (value) => (Array.isArray(value) ? value : []);
+const normalizeText = (value) => (typeof value === 'string' ? value.trim() : '');
 const normalizeStringArray = (value) =>
   normalizeArray(value)
     .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
@@ -75,6 +76,131 @@ const DECISION_FIELD_LABELS = {
   finishChosen: 'Finish chosen',
   ownedToolsConfirmed: 'Owned tools confirmed',
   measurementsConfirmed: 'Measurements confirmed',
+};
+const SHOPPING_CATEGORY_PATTERNS = [
+  { category: 'PPE', regex: /\b(safety specs|safety glasses|goggles|gloves|respirator|dust mask|ear protection)\b/i },
+  { category: 'fastener', regex: /\b(screws?|nails?|bolts?)\b/i },
+  { category: 'fixing', regex: /\b(wall plugs?|anchors?|anchor bolts?)\b/i },
+  { category: 'consumable', regex: /\b(sandpaper|blades?|adhesive|sealant|tape|filler|paint|primer|caulk)\b/i },
+  { category: 'material', regex: /\b(joint compound|plaster patch|compound|primer|filler|sealant|paint)\b/i },
+  { category: 'tool', regex: /\b(drill|driver|knife|hammer|screwdriver|sander|taping knife|level)\b/i },
+  { category: 'rental', regex: /\b(rent|rental|hire|borrow)\b/i },
+];
+const SHOPPING_ITEM_REGEX =
+  /\b(joint compound|plaster patch|taping knife|sandpaper|primer|safety specs|safety glasses|goggles|dust mask|gloves|respirator|drill|hammer drill|drill bits?|masonry bits?|screws?|wall plugs?|anchors?|adhesive|sealant|tape|filler|paint|caulk|blades?|ear protection|sanding block)\b/gi;
+
+const inferShoppingStatus = (content, itemName) => {
+  const lowered = content.toLowerCase();
+  const item = itemName.toLowerCase();
+  const aroundItemRegex = new RegExp(`(.{0,40}${escapeRegex(item)}.{0,40})`, 'i');
+  const local = (lowered.match(aroundItemRegex)?.[0] || lowered).toLowerCase();
+  if (/\b(safety|ppe|goggles|mask|respirator|gloves|ear protection)\b/.test(item)) return 'safety';
+  if (/\b(hire|rent|borrow)\b/.test(local)) return 'hire_or_borrow';
+  if (/\b(optional|better option|worth upgrading|upgrade|cleaner finish)\b/.test(local)) return 'optional';
+  if (/\b(consumable|single use|used up)\b/.test(local)) return 'consumable';
+  if (/\b(you(?:'| wi)ll need|you need|grab|pick up|get|use)\b/.test(local)) return 'must_buy';
+  return 'must_buy';
+};
+
+const inferShoppingCategory = (itemName) => {
+  for (const matcher of SHOPPING_CATEGORY_PATTERNS) {
+    if (matcher.regex.test(itemName)) return matcher.category;
+  }
+  return 'unknown';
+};
+
+const buildShoppingItemsFromAssistant = (content, previousItems = []) => {
+  const source = typeof content === 'string' ? content : '';
+  if (!source.trim()) return normalizeArray(previousItems);
+  const nextByKey = new Map();
+  normalizeArray(previousItems).forEach((entry) => {
+    if (!entry || typeof entry !== 'object') return;
+    const item = normalizeText(entry.item || entry.name || '');
+    if (!item) return;
+    nextByKey.set(item.toLowerCase(), {
+      item,
+      category: entry.category || inferShoppingCategory(item),
+      status: entry.status || 'must_buy',
+      reason: entry.reason || '',
+    });
+  });
+
+  const matches = source.match(SHOPPING_ITEM_REGEX) || [];
+  matches.forEach((rawMatch) => {
+    const item = normalizeText(rawMatch);
+    if (!item) return;
+    const key = item.toLowerCase();
+    const status = inferShoppingStatus(source, item);
+    const existing = nextByKey.get(key);
+    nextByKey.set(key, {
+      item: existing?.item || item,
+      category: existing?.category || inferShoppingCategory(item),
+      status,
+      reason: existing?.reason || 'Derived from assistant guidance',
+    });
+  });
+
+  return Array.from(nextByKey.values());
+};
+
+const projectShoppingItemsToLists = (items = [], alreadyOwnedFallback = []) => {
+  const lists = {
+    mustBuy: [],
+    alreadyOwned: normalizeStringArray(alreadyOwnedFallback),
+    optionalUpgrades: [],
+    consumables: [],
+    safety: [],
+    hireOrBorrow: [],
+  };
+  const byStatusKey = new Map();
+  normalizeArray(items).forEach((entry) => {
+    const item = normalizeText(entry.item || entry.name || '');
+    if (!item) return;
+    byStatusKey.set(item.toLowerCase(), item);
+    switch (entry.status) {
+      case 'already_owned':
+        lists.alreadyOwned.push(item);
+        break;
+      case 'optional':
+        lists.optionalUpgrades.push(item);
+        break;
+      case 'consumable':
+        lists.consumables.push(item);
+        break;
+      case 'safety':
+        lists.safety.push(item);
+        break;
+      case 'hire_or_borrow':
+        lists.hireOrBorrow.push(item);
+        break;
+      default:
+        lists.mustBuy.push(item);
+        break;
+    }
+  });
+
+  Object.keys(lists).forEach((key) => {
+    lists[key] = Array.from(new Set(lists[key].map((item) => item.trim()).filter(Boolean)));
+  });
+  return lists;
+};
+
+const mergeShoppingItems = (...itemGroups) => {
+  const merged = new Map();
+  itemGroups.forEach((group) => {
+    normalizeArray(group).forEach((entry) => {
+      if (!entry || typeof entry !== 'object') return;
+      const item = normalizeText(entry.item || entry.name || '');
+      if (!item) return;
+      merged.set(item.toLowerCase(), {
+        item,
+        category: entry.category || inferShoppingCategory(item),
+        status: entry.status || 'must_buy',
+        reason: entry.reason || '',
+      });
+    });
+  });
+  return Array.from(merged.values());
 };
 
 const toToolName = (tool) => {
@@ -238,6 +364,17 @@ const buildDerivedJobState = ({
   const nonOptionalMissing = recommendationMissing.filter((name) => !optionalHelpful.includes(name));
   const mustBuy = nonOptionalMissing.filter((name) => classifyToolName(name) === 'mustBuy');
   const consumables = nonOptionalMissing.filter((name) => classifyToolName(name) === 'consumables');
+  const previousShoppingItems = normalizeArray(previous.savedShoppingList?.items);
+  const assistantDerivedItems = buildShoppingItemsFromAssistant(messageDoc.content, previousShoppingItems);
+  const mergedToolItems = [
+    ...assistantDerivedItems,
+    ...mustBuy.map((name) => ({ item: name, category: inferShoppingCategory(name), status: 'must_buy' })),
+    ...consumables.map((name) => ({ item: name, category: 'consumable', status: 'consumable' })),
+    ...alreadyOwned.map((name) => ({ item: name, category: inferShoppingCategory(name), status: 'already_owned' })),
+    ...optionalHelpful.map((name) => ({ item: name, category: inferShoppingCategory(name), status: 'optional' })),
+  ];
+  const uniqueMergedItems = mergeShoppingItems(assistantDerivedItems, mergedToolItems);
+  const projectedShopping = projectShoppingItemsToLists(uniqueMergedItems, alreadyOwned);
 
   const nextStage = metadata.currentStage || inferStageFromContent(messageDoc.content, previousStage.currentStage);
   const previousWeight = STAGE_WEIGHT[previousStage.currentStage] ?? 0;
@@ -261,10 +398,13 @@ const buildDerivedJobState = ({
         '',
     },
     savedShoppingList: {
-      mustBuy,
-      alreadyOwned,
-      optionalUpgrades: optionalHelpful,
-      consumables,
+      mustBuy: projectedShopping.mustBuy,
+      alreadyOwned: projectedShopping.alreadyOwned,
+      optionalUpgrades: projectedShopping.optionalUpgrades,
+      consumables: projectedShopping.consumables,
+      safety: projectedShopping.safety,
+      hireOrBorrow: projectedShopping.hireOrBorrow,
+      items: uniqueMergedItems,
       estimatedSpendByBudgetTier: estimateSpendByBudgetTier(
         normalizeArray(messageDoc.suggestedTools),
         metadata.budget,
@@ -273,7 +413,7 @@ const buildDerivedJobState = ({
     missingItems: {
       alreadyCovered: alreadyOwned,
       missing: nonOptionalMissing,
-      optionalHelpful,
+      optionalHelpful: projectedShopping.optionalUpgrades,
     },
     decisionLog,
     updatedAt: messageDoc.createdAt,
@@ -330,6 +470,10 @@ const toPublicMessage = (doc) => {
     suggestedTools: normalizeArray(doc.suggestedTools),
     toolsUsed: normalizeArray(doc.toolsUsed),
     isToolSuggestion: computeIsToolSuggestion(doc),
+    flagTriggered: Boolean(doc.flagTriggered),
+    flaggedAt: doc.flaggedAt || null,
+    flagReasons: normalizeArray(doc.flagReasons),
+    flagStatus: doc.flagStatus || null,
     metadata: doc.metadata && typeof doc.metadata === 'object' ? doc.metadata : {},
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
@@ -433,6 +577,69 @@ module.exports = ({
     return { error: { status: 403, message: 'Forbidden: session access denied' } };
   };
 
+  /**
+   * Older sessions may have missing or stale totalImageAttachments / totalSuggestedTools.
+   * Recompute from MessagesJob, take max(stored, computed), and persist so list + modal stay accurate.
+   */
+  const mergeSessionTotalsFromMessages = async (sessionDoc) => {
+    if (!sessionDoc?.sessionId || !messagesJobStorage) return sessionDoc;
+    const sid = sessionDoc.sessionId;
+    try {
+      const [imgRows, toolRows] = await Promise.all([
+        messagesJobStorage
+          .aggregate([
+            { $match: { sessionId: sid } },
+            {
+              $group: {
+                _id: null,
+                n: { $sum: { $size: { $ifNull: ['$images', []] } } },
+              },
+            },
+          ])
+          .toArray(),
+        messagesJobStorage
+          .aggregate([
+            { $match: { sessionId: sid, role: { $in: ['matey', 'assistant'] } } },
+            {
+              $group: {
+                _id: null,
+                n: {
+                  $sum: {
+                    $add: [
+                      { $size: { $ifNull: ['$suggestedTools', []] } },
+                      { $size: { $ifNull: ['$toolsUsed', []] } },
+                    ],
+                  },
+                },
+              },
+            },
+          ])
+          .toArray(),
+      ]);
+      const computedImages = Number(imgRows[0]?.n) || 0;
+      const computedTools = Number(toolRows[0]?.n) || 0;
+      const storedImages = Number(sessionDoc.totalImageAttachments) || 0;
+      const storedTools = Number(sessionDoc.totalSuggestedTools) || 0;
+      const totalImageAttachments = Math.max(storedImages, computedImages);
+      const totalSuggestedTools = Math.max(storedTools, computedTools);
+      if (totalImageAttachments !== storedImages || totalSuggestedTools !== storedTools) {
+        const now = new Date();
+        await mateyChatSessionsStorage.updateOne(
+          { sessionId: sid },
+          { $set: { totalImageAttachments, totalSuggestedTools, updatedAt: now } },
+        );
+      }
+      return {
+        ...sessionDoc,
+        totalImageAttachments,
+        totalSuggestedTools,
+      };
+    } catch (err) {
+      console.error('mergeSessionTotalsFromMessages', sid, err);
+      return sessionDoc;
+    }
+  };
+
   const chatLimiter = createChatRateLimiter({
     perMinute: Number.parseInt(process.env.CHAT_RATE_PER_MINUTE, 10) || 120,
     perDay: Number.parseInt(process.env.CHAT_RATE_PER_DAY, 10) || 500,
@@ -446,6 +653,7 @@ module.exports = ({
     const now = messageDoc.createdAt;
     const incomingTitle = sessionDelta.titleCandidate;
     const totalSuggestedToolsIncrement = normalizeArray(messageDoc.suggestedTools).length;
+    const imageAttachmentsInc = normalizeArray(messageDoc.images).length;
     const sessionCountersInc = {
       messageCount: 1,
       userMessageCount: messageDoc.role === 'user' ? 1 : 0,
@@ -459,12 +667,21 @@ module.exports = ({
         options,
       );
     };
+    const incrementImageAttachments = async (options = undefined) => {
+      if (imageAttachmentsInc <= 0) return;
+      await mateyChatSessionsStorage.updateOne(
+        { sessionId },
+        { $inc: { totalImageAttachments: imageAttachmentsInc } },
+        options,
+      );
+    };
     const sessionUpdate = {
       $setOnInsert: {
         sessionId,
         title: incomingTitle || DEFAULT_TITLE,
         createdAt: now,
         totalSuggestedTools: 0,
+        totalImageAttachments: 0,
       },
       $set: {
         updatedAt: now,
@@ -496,6 +713,7 @@ module.exports = ({
             session,
           });
           await incrementSuggestedTools({ session });
+          await incrementImageAttachments({ session });
         });
         return inserted;
       } finally {
@@ -505,6 +723,7 @@ module.exports = ({
     const insertResult = await messagesJobStorage.insertOne(messageDoc);
     await mateyChatSessionsStorage.updateOne({ sessionId }, sessionUpdate, { upsert: true });
     await incrementSuggestedTools();
+    await incrementImageAttachments();
     return insertResult;
   };
   router.post('/chat/session/init', requireAuth, async (req, res) => {
@@ -544,6 +763,7 @@ module.exports = ({
             userMessageCount: 0,
             mateyMessageCount: 0,
             totalSuggestedTools: 0,
+            totalImageAttachments: 0,
           },
           $set: {
             updatedAt: now,
@@ -621,7 +841,8 @@ module.exports = ({
           ? previousSessionDoc.jobState
           : {};
       let derivedJobState = previousJobState;
-      if (isToolSuggestion) {
+      const shouldDeriveJobState = normalizedRole === 'matey';
+      if (shouldDeriveJobState) {
         const shedRows = shedToolsStorage ?
           await shedToolsStorage
             .find({
@@ -645,7 +866,7 @@ module.exports = ({
       }
       const mergedMetadata = {
         ...normalizedMetadata,
-        ...(isToolSuggestion ? { jobState: derivedJobState } : {}),
+        ...(shouldDeriveJobState ? { jobState: derivedJobState } : {}),
       };
 
       const messageDoc = {
@@ -675,7 +896,7 @@ module.exports = ({
             userEmail: verifiedUserEmail,
             userName,
             titleCandidate,
-            ...(isToolSuggestion ? { jobState: derivedJobState } : {}),
+            ...(shouldDeriveJobState ? { jobState: derivedJobState } : {}),
           },
         });
       } catch (insertErr) {
@@ -834,6 +1055,80 @@ module.exports = ({
     }
   });
 
+  router.patch('/chat/sessions/:sessionId/shopping-list', requireAuth, async (req, res) => {
+    try {
+      const { sessionId } = req.params;
+      const { action, item, status, category } = req.body || {};
+      if (!sessionId || typeof sessionId !== 'string') {
+        return res.status(400).json({ error: 'sessionId is required' });
+      }
+      const access = await ensureSessionAccess({
+        sessionId,
+        authUser: req.authUser,
+        allowMissing: false,
+        claimUnowned: false,
+      });
+      if (access.error) {
+        return res.status(access.error.status).json({ error: access.error.message });
+      }
+      const sessionDoc = access.sessionDoc;
+      const jobState = sessionDoc?.jobState && typeof sessionDoc.jobState === 'object' ? sessionDoc.jobState : {};
+      const savedShoppingList =
+        jobState.savedShoppingList && typeof jobState.savedShoppingList === 'object' ? jobState.savedShoppingList : {};
+      const existingItems = normalizeArray(savedShoppingList.items);
+      const normalizedItem = normalizeText(item);
+      let nextItems = mergeShoppingItems(existingItems);
+
+      if (action === 'remove') {
+        nextItems = nextItems.filter((entry) => entry.item.toLowerCase() !== normalizedItem.toLowerCase());
+      } else if (action === 'upsert' && normalizedItem) {
+        const nextStatus = normalizeText(status) || 'must_buy';
+        const nextCategory = normalizeText(category) || inferShoppingCategory(normalizedItem);
+        nextItems = mergeShoppingItems(nextItems, [
+          {
+            item: normalizedItem,
+            status: nextStatus,
+            category: nextCategory,
+            reason: 'Updated by user',
+          },
+        ]);
+      } else {
+        return res.status(400).json({ error: 'Invalid action or item' });
+      }
+
+      const projected = projectShoppingItemsToLists(nextItems, savedShoppingList.alreadyOwned);
+      const nextJobState = {
+        ...jobState,
+        savedShoppingList: {
+          ...savedShoppingList,
+          mustBuy: projected.mustBuy,
+          alreadyOwned: projected.alreadyOwned,
+          optionalUpgrades: projected.optionalUpgrades,
+          consumables: projected.consumables,
+          safety: projected.safety,
+          hireOrBorrow: projected.hireOrBorrow,
+          items: nextItems,
+        },
+        updatedAt: new Date(),
+      };
+
+      await mateyChatSessionsStorage.updateOne(
+        { sessionId },
+        {
+          $set: {
+            jobState: nextJobState,
+            updatedAt: new Date(),
+          },
+        },
+      );
+
+      return res.json({ success: true, sessionId, jobState: nextJobState });
+    } catch (error) {
+      console.error('Error updating shopping list:', error);
+      return res.status(500).json({ error: 'Failed to update shopping list' });
+    }
+  });
+
   router.get('/chat/sessions', requireAuth, async (req, res) => {
     try {
       const { sessionId, limit = 20 } = req.query;
@@ -866,7 +1161,7 @@ module.exports = ({
         return res.status(401).json({ error: 'Unauthorized: user identity missing' });
       }
 
-      const sessions = await mateyChatSessionsStorage
+      let sessions = await mateyChatSessionsStorage
         .find(query)
         .project({
           sessionId: 1,
@@ -875,6 +1170,7 @@ module.exports = ({
           userMessageCount: 1,
           mateyMessageCount: 1,
           totalSuggestedTools: 1,
+          totalImageAttachments: 1,
           createdAt: 1,
           updatedAt: 1,
           lastMessageAt: 1,
@@ -885,6 +1181,16 @@ module.exports = ({
         .sort({ lastMessageAt: -1, updatedAt: -1, createdAt: -1 })
         .limit(pageSize)
         .toArray();
+
+      sessions = await Promise.all(
+        sessions.map((row) => {
+          const mc = Number(row.messageCount) || 0;
+          const img = Number(row.totalImageAttachments) || 0;
+          const tools = Number(row.totalSuggestedTools) || 0;
+          if (mc <= 0 || (img > 0 && tools > 0)) return Promise.resolve(row);
+          return mergeSessionTotalsFromMessages(row);
+        }),
+      );
 
       return res.json({ success: true, sessions });
     } catch (error) {
@@ -971,6 +1277,7 @@ module.exports = ({
               userMessageCount: 0,
               mateyMessageCount: 0,
               totalSuggestedTools: 0,
+              totalImageAttachments: 0,
               title: DEFAULT_TITLE,
               updatedAt: now,
               lastMessageAt: now,
@@ -1055,6 +1362,9 @@ module.exports = ({
               userMessageCount: 1,
               mateyMessageCount: 1,
               totalSuggestedTools: 1,
+              flaggedMessageCount: 1,
+              hasFlaggedMessages: 1,
+              lastFlaggedAt: 1,
               createdAt: 1,
               updatedAt: 1,
               lastMessageAt: 1,
@@ -1093,8 +1403,10 @@ module.exports = ({
             ...sessionDoc,
             prompt: latestUserMessage?.content || '',
             timestamp: sessionDoc.lastMessageAt || sessionDoc.updatedAt || sessionDoc.createdAt,
-            flagTriggered: false,
-            toolCount: 0,
+            flaggedMessageCount: Number(sessionDoc.flaggedMessageCount || 0),
+            hasFlaggedMessages: Boolean(sessionDoc.hasFlaggedMessages || Number(sessionDoc.flaggedMessageCount || 0) > 0),
+            flagTriggered: Boolean(sessionDoc.hasFlaggedMessages || Number(sessionDoc.flaggedMessageCount || 0) > 0),
+            toolCount: Number(sessionDoc.totalSuggestedTools || 0),
             userDetails: enrichUserWithSubscription(user),
           };
         }),
@@ -1180,6 +1492,9 @@ module.exports = ({
 
       return res.json({
         ...sessionDoc,
+        flaggedMessageCount: Number(sessionDoc.flaggedMessageCount || 0),
+        hasFlaggedMessages: Boolean(sessionDoc.hasFlaggedMessages || Number(sessionDoc.flaggedMessageCount || 0) > 0),
+        flagTriggered: Boolean(sessionDoc.hasFlaggedMessages || Number(sessionDoc.flaggedMessageCount || 0) > 0),
         userDetails: enrichUserWithSubscription(user),
       });
     } catch (error) {
@@ -1195,7 +1510,8 @@ module.exports = ({
         return res.status(400).json({ error: 'sessionId is required' });
       }
 
-      const [firstUserRow, lastMateyRow, mateyToolRows] = await Promise.all([
+      const [sessionDoc, firstUserRow, lastMateyRow, mateyToolRows] = await Promise.all([
+        mateyChatSessionsStorage.findOne({ sessionId }),
         messagesJobStorage.findOne(
           { sessionId, role: 'user' },
           {
@@ -1226,6 +1542,14 @@ module.exports = ({
         suggestedTools,
         mateyResponse: lastMateyRow?.content || '',
         fullPrompt: firstUserRow?.content || '',
+        latestMateyImages: normalizeArray(lastMateyRow?.images),
+        latestMateySuggestedTools: normalizeArray(lastMateyRow?.suggestedTools),
+        latestMateyToolsUsed: normalizeArray(lastMateyRow?.toolsUsed),
+        flaggedMessageCount: Number(sessionDoc?.flaggedMessageCount || 0),
+        hasFlaggedMessages: Boolean(
+          sessionDoc?.hasFlaggedMessages || Number(sessionDoc?.flaggedMessageCount || 0) > 0,
+        ),
+        flagTriggered: Boolean(sessionDoc?.hasFlaggedMessages || Number(sessionDoc?.flaggedMessageCount || 0) > 0),
       });
     } catch (error) {
       console.error('Error fetching admin chat session details from messages-job:', error);
@@ -1235,7 +1559,7 @@ module.exports = ({
 
   router.get('/admin/messages-job-logs', async (req, res) => {
     try {
-      const { page = 1, limit = 20, search, userId, dateFrom, dateTo, lightweight } = req.query;
+      const { page = 1, limit = 20, search, userId, dateFrom, dateTo, lightweight, flaggedOnly } = req.query;
       const pageNumber = Math.max(Number.parseInt(page, 10) || 1, 1);
       const limitNumber = Math.min(Math.max(Number.parseInt(limit, 10) || 20, 1), 100);
       const skip = (pageNumber - 1) * limitNumber;
@@ -1263,6 +1587,9 @@ module.exports = ({
           },
         ];
       }
+      if (String(flaggedOnly).toLowerCase() === 'true') {
+        query.flagTriggered = true;
+      }
 
       const projection =
         lightweight === 'true'
@@ -1275,6 +1602,10 @@ module.exports = ({
               suggestedTools: 1,
               toolsUsed: 1,
               isToolSuggestion: 1,
+              flagTriggered: 1,
+              flaggedAt: 1,
+              flagReasons: 1,
+              flagStatus: 1,
               metadata: 1,
               createdAt: 1,
               updatedAt: 1,
@@ -1288,6 +1619,10 @@ module.exports = ({
               suggestedTools: 1,
               toolsUsed: 1,
               isToolSuggestion: 1,
+              flagTriggered: 1,
+              flaggedAt: 1,
+              flagReasons: 1,
+              flagStatus: 1,
               metadata: 1,
               createdAt: 1,
               updatedAt: 1,
@@ -1338,6 +1673,10 @@ module.exports = ({
             suggestedTools: Array.isArray(row.suggestedTools) ? row.suggestedTools : [],
             toolsUsed: Array.isArray(row.toolsUsed) ? row.toolsUsed : [],
             isToolSuggestion: computeIsToolSuggestion(row),
+            flagTriggered: Boolean(row.flagTriggered),
+            flaggedAt: row.flaggedAt || null,
+            flagReasons: normalizeArray(row.flagReasons),
+            flagStatus: row.flagStatus || null,
             timestamp: row.createdAt,
             metadata: row.metadata && typeof row.metadata === 'object' ? row.metadata : {},
             userDetails: enrichUserWithSubscription(user),
@@ -1401,6 +1740,10 @@ module.exports = ({
         suggestedTools: Array.isArray(row.suggestedTools) ? row.suggestedTools : [],
         toolsUsed: Array.isArray(row.toolsUsed) ? row.toolsUsed : [],
         isToolSuggestion: computeIsToolSuggestion(row),
+        flagTriggered: Boolean(row.flagTriggered),
+        flaggedAt: row.flaggedAt || null,
+        flagReasons: normalizeArray(row.flagReasons),
+        flagStatus: row.flagStatus || null,
         timestamp: row.createdAt,
         metadata: row.metadata && typeof row.metadata === 'object' ? row.metadata : {},
         userDetails: enrichUserWithSubscription(user),

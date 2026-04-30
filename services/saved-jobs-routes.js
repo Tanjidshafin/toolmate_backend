@@ -98,6 +98,8 @@ const buildShortlistFromJobState = (jobState = {}) => {
   if (Array.isArray(sl.consumables)) sl.consumables.forEach((n) => list.push({ name: n, group: 'consumables' }));
   if (Array.isArray(sl.optionalUpgrades))
     sl.optionalUpgrades.forEach((n) => list.push({ name: n, group: 'optional' }));
+  if (Array.isArray(sl.safety)) sl.safety.forEach((n) => list.push({ name: n, group: 'safety' }));
+  if (Array.isArray(sl.hireOrBorrow)) sl.hireOrBorrow.forEach((n) => list.push({ name: n, group: 'hire_or_borrow' }));
   return list;
 };
 
