@@ -37,43 +37,6 @@ module.exports = ({
   const router = express.Router();
   const requireAuth = createRequireAuth({ usersStorage });
 
-  const logPurchaseHistory = async ({
-    userEmail,
-    userId,
-    userName,
-    type,
-    description,
-    amount,
-    currency,
-    status,
-    metadata,
-  }) => {
-    if (!subscriptionStorage || !userEmail) return;
-    const dedupeKey = metadata?.idempotencyKey;
-    if (dedupeKey) {
-      const existing = await subscriptionStorage.findOne({
-        userEmail,
-        'metadata.idempotencyKey': dedupeKey,
-      });
-      if (existing) return;
-    }
-
-    await subscriptionStorage.insertOne({
-      userEmail,
-      userId: userId || userEmail,
-      clerkId: userId || null,
-      userName: userName || 'ToolMate User',
-      type,
-      description,
-      amount: amount || 0,
-      currency: (currency || 'AUD').toUpperCase(),
-      status,
-      date: new Date(),
-      createdAt: new Date(),
-      metadata: metadata || {},
-    });
-  };
-
   const trackEvent = async (eventName, payload) => {
     if (!offerAnalyticsStorage) return;
     try {
@@ -144,28 +107,6 @@ module.exports = ({
         providerPriceRef: providerPriceRef || null,
         currency: currency || 'AUD',
         amount: typeof amount === 'number' ? amount : null,
-      });
-
-      await logPurchaseHistory({
-        userEmail: authUser.userEmail,
-        userId: authUser.userId,
-        userName: authUser.userName,
-        type: 'job_pass_checkout',
-        description: `Job Pass checkout started (${productSku === 'job_pass_3pack' ? '3 Job Pass Pack' : 'Single Job Pass'})`,
-        amount: offer.amount,
-        currency: offer.currency,
-        status: 'pending',
-        metadata: {
-          idempotencyKey: `job_pass_checkout:stripe:${session.providerOrderId}`,
-          paymentProvider: 'stripe',
-          providerOrderId: session.providerOrderId,
-          stripeSessionId: session.providerOrderId,
-          productSku,
-          packQuantity: offer.packQuantity,
-          passId,
-          jobId,
-          kind: 'job_pass',
-        },
       });
       return res.json({ success: true });
     } catch (err) {

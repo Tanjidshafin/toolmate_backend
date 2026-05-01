@@ -1067,11 +1067,26 @@ module.exports = (dependencies) => {
         .skip((page - 1) * limit)
         .limit(Number.parseInt(limit))
         .toArray();
+      const normalizePurchaseDisplayAmount = (log) => {
+        const raw = typeof log.amount === 'number' ? log.amount : Number(log.amount) || 0;
+        const md = log.metadata || {};
+        if (
+          log.type === 'job_pass_checkout' &&
+          md.paymentProvider === 'paypal' &&
+          Number.isFinite(raw) &&
+          raw >= 100 &&
+          Number.isInteger(raw)
+        ) {
+          return Number((raw / 100).toFixed(2));
+        }
+        return raw;
+      };
+
       const formattedLogs = purchaseLogs.map((log) => ({
         id: log._id.toString(),
         type: log.type || log.action || 'transaction',
         description: log.description || log.title || 'Transaction',
-        amount: log.amount || 0,
+        amount: normalizePurchaseDisplayAmount(log),
         currency: log.currency || 'AUD',
         status: log.status || 'completed',
         date: log.date || log.createdAt || log.timestamp || new Date(),

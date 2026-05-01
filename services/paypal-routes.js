@@ -161,7 +161,7 @@ module.exports = ({
         userName: authUser.userName,
         type: 'job_pass_checkout',
         description: `Job Pass checkout started (${productSku === 'job_pass_3pack' ? '3 Job Pass Pack' : 'Single Job Pass'})`,
-        amount: offer.amount,
+        amount: Number(((offer.amount || 0) / 100).toFixed(2)),
         currency: offer.currency,
         status: 'pending',
         metadata: {
