@@ -308,6 +308,21 @@ const bindPassToJob = async ({
 
   // Post-binding analytics + audit. Soft-fail so a failed analytics insert
   // never breaks payment.
+  let hadCompletionAnalytics = false;
+  try {
+    if (offerAnalyticsStorage && parsedEvent.providerPaymentId) {
+      hadCompletionAnalytics = Boolean(
+        await offerAnalyticsStorage.findOne({
+          paymentProvider: parsedEvent.paymentProvider,
+          providerPaymentId: parsedEvent.providerPaymentId,
+          eventName: { $in: ['job_pass_checkout_completed', 'job_pass_checkout_completed_unbound'] },
+        }),
+      );
+    }
+  } catch (preErr) {
+    console.warn('bindPassToJob: completion lookup failed:', preErr?.message || preErr);
+  }
+
   try {
     if (subscriptionStorage && parsedEvent.userEmail) {
       const purchaseDisplay =
@@ -350,7 +365,7 @@ const bindPassToJob = async ({
       }
     }
 
-    if (offerAnalyticsStorage) {
+    if (offerAnalyticsStorage && !hadCompletionAnalytics) {
       await offerAnalyticsStorage.insertOne({
         eventName:
           result.status === 'unlocked'
@@ -379,7 +394,7 @@ const bindPassToJob = async ({
   }
 
   try {
-    if (auditLogger) {
+    if (auditLogger && parsedEvent.providerPaymentId && !hadCompletionAnalytics) {
       await auditLogger.logAudit({
         action: result.status === 'unlocked' ? 'JOB_PASS_BOUND' : 'JOB_PASS_PURCHASED',
         resource: 'job_pass',

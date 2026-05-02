@@ -23,6 +23,8 @@ const { bindPassToJob } = require('./job-pass-bind');
 const { getPricingConfig, resolveOfferForCheckout } = require('./pricing-config');
 
 const VALID_SKUS = new Set(['job_pass_single', 'job_pass_3pack']);
+/** Aligned with client chat session ids (UUID or session_* tokens); path-safe segment. */
+const CHAT_SESSION_ID_RE = /^[a-zA-Z0-9_-]{1,128}$/;
 
 module.exports = ({
   usersStorage,
@@ -120,11 +122,13 @@ module.exports = ({
       if (!authUser?.userId) {
         return res.status(401).json({ error: 'Sign in required to buy a Job Pass' });
       }
-      const { productSku = 'job_pass_single', jobId = null, origin } = req.body || {};
+      const { productSku = 'job_pass_single', jobId = null, origin, chatSessionId: rawChatSessionId } = req.body || {};
       if (!VALID_SKUS.has(productSku)) {
         return res.status(400).json({ error: `Invalid productSku: ${productSku}` });
       }
 
+      let returnContext = 'pricing';
+      let chatSessionId = null;
       // Validate that the user actually owns the job they're trying to bind to.
       if (jobId) {
         const job = await savedJobsStorage.findOne({ jobId });
@@ -132,6 +136,12 @@ module.exports = ({
         if (job.userId && job.userId !== authUser.userId) {
           return res.status(403).json({ error: 'Forbidden: cannot pay for a job you do not own' });
         }
+        returnContext = 'chat';
+        const cs = typeof rawChatSessionId === 'string' ? rawChatSessionId.trim() : '';
+        if (!CHAT_SESSION_ID_RE.test(cs)) {
+          return res.status(400).json({ error: 'Valid chatSessionId is required for job-bound checkout' });
+        }
+        chatSessionId = cs;
       }
 
       const config = await getPricingConfig(promoStorage);
@@ -147,6 +157,8 @@ module.exports = ({
         jobId,
         passId,
         origin: origin || req.headers.origin,
+        returnContext,
+        chatSessionId,
         metadata: {
           userId: authUser.userId,
         },

@@ -20,7 +20,39 @@ const buildSafeOrigin = (origin) => {
   return raw.endsWith('/') ? raw.slice(0, -1) : raw;
 };
 
-const createJobPassCheckout = async ({ offer, userEmail, jobId, passId, origin, metadata = {} }) => {
+/**
+ * @param {'pricing'|'chat'} returnContext
+ * @param {string|null|undefined} chatSessionId — required when returnContext is 'chat'
+ */
+const buildJobPassStripeUrls = ({ safeOrigin, returnContext, chatSessionId, jobId }) => {
+  const jobParam = encodeURIComponent(jobId || '');
+  const sessionPlaceholder = '{CHECKOUT_SESSION_ID}';
+  if (returnContext === 'chat') {
+    if (!chatSessionId || typeof chatSessionId !== 'string') {
+      throw new Error('chatSessionId is required for chat return context');
+    }
+    const seg = encodeURIComponent(chatSessionId.trim());
+    return {
+      success_url: `${safeOrigin}/chat/${seg}?success=true&session_id=${sessionPlaceholder}&job_id=${jobParam}`,
+      cancel_url: `${safeOrigin}/chat/${seg}?job_pass_cancel=1`,
+    };
+  }
+  return {
+    success_url: `${safeOrigin}/pricing?success=true&session_id=${sessionPlaceholder}&job_id=${jobParam}`,
+    cancel_url: `${safeOrigin}/pricing?job_pass_cancel=1`,
+  };
+};
+
+const createJobPassCheckout = async ({
+  offer,
+  userEmail,
+  jobId,
+  passId,
+  origin,
+  metadata = {},
+  returnContext = 'pricing',
+  chatSessionId = null,
+}) => {
   if (!offer) throw new Error('Stripe checkout requires a resolved offer');
   if (!offer.providerPriceRef) {
     throw new Error(
@@ -33,6 +65,12 @@ const createJobPassCheckout = async ({ offer, userEmail, jobId, passId, origin, 
   }
 
   const safeOrigin = buildSafeOrigin(origin);
+  const { success_url, cancel_url } = buildJobPassStripeUrls({
+    safeOrigin,
+    returnContext,
+    chatSessionId,
+    jobId,
+  });
 
   const session = await stripe.checkout.sessions.create({
     payment_method_types: ['card'],
@@ -44,12 +82,8 @@ const createJobPassCheckout = async ({ offer, userEmail, jobId, passId, origin, 
       },
     ],
     customer_email: userEmail || undefined,
-    success_url: `${safeOrigin}/job-pass/success?session_id={CHECKOUT_SESSION_ID}&job_id=${encodeURIComponent(
-      jobId || '',
-    )}`,
-    cancel_url: `${safeOrigin}/job-pass/cancel?session_id={CHECKOUT_SESSION_ID}&job_id=${encodeURIComponent(
-      jobId || '',
-    )}`,
+    success_url,
+    cancel_url,
     metadata: {
       ...metadata,
       passId: passId || '',
