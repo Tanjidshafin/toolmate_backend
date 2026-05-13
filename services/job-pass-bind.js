@@ -26,6 +26,8 @@
  */
 
 const { randomUUID } = require('crypto');
+const { ownsSavedJob, buildUnlockOwnerFilter } = require('./saved-jobs-internal');
+const { createSnapshotHelpers } = require('./saved-jobs-snapshot');
 
 const supportsTransactions = (mongoClient) => {
   return Boolean(
@@ -151,6 +153,36 @@ const truncateRawEvent = (raw) => {
  * The conditional `packRemaining > 0` filter is what protects against the
  * "two browser tabs both clicked Use my pass" race.
  */
+/** Best-effort undo if unlock fails after a seat was consumed (should be extremely rare). */
+const rollbackPassConsumption = async ({ jobPassesStorage, passId, jobId, session }) => {
+  const opts = buildSessionOptions(session);
+  const now = new Date();
+  await jobPassesStorage.updateOne(
+    { passId },
+    {
+      $inc: { packRemaining: 1 },
+      $pull: { consumptions: { jobId } },
+      $set: { updatedAt: now },
+    },
+    opts,
+  );
+  const p = await jobPassesStorage.findOne({ passId }, opts);
+  if (p && p.status === 'consumed' && (p.packRemaining || 0) > 0) {
+    await jobPassesStorage.updateOne(
+      { passId },
+      {
+        $set: {
+          status: 'active',
+          consumedAt: null,
+          consumedByJobId: null,
+          updatedAt: now,
+        },
+      },
+      opts,
+    );
+  }
+};
+
 const consumePassForJob = async ({
   jobPassesStorage,
   passId,
@@ -200,19 +232,32 @@ const consumePassForJob = async ({
   return next;
 };
 
+/**
+ * Atomically unlock a saved job only when `jobDoc` matches owner + not deleted.
+ * @param {object} params.jobDoc — row from DB (must include jobId, userId/userEmail).
+ */
 const unlockSavedJob = async ({
   savedJobsStorage,
-  jobId,
+  jobDoc,
   passId,
   paymentProvider,
   paymentId,
   session,
+  mateyChatSessionsStorage,
+  messagesJobStorage,
+  shedToolsStorage,
+  freezeReason = 'payment_success',
 }) => {
-  if (!jobId) return null;
+  if (!jobDoc?.jobId) return null;
+  const ownerFilter = buildUnlockOwnerFilter(jobDoc);
+  if (!ownerFilter) return null;
   const now = new Date();
   const opts = session ? { session, returnDocument: 'after' } : { returnDocument: 'after' };
   const result = await savedJobsStorage.findOneAndUpdate(
-    { jobId },
+    {
+      ...ownerFilter,
+      lockState: { $in: ['draft', 'locked'] },
+    },
     {
       $set: {
         lockState: 'unlocked',
@@ -226,7 +271,18 @@ const unlockSavedJob = async ({
     },
     opts,
   );
-  return findOneAndUpdateDoc(result);
+  const unlocked = findOneAndUpdateDoc(result);
+  if (!unlocked) return null;
+  if (mateyChatSessionsStorage && messagesJobStorage && shedToolsStorage !== undefined) {
+    const helpers = createSnapshotHelpers({ mateyChatSessionsStorage, messagesJobStorage, shedToolsStorage });
+    return helpers.freezeSnapshotIfNotFrozen({
+      savedJobsStorage,
+      jobDoc: unlocked,
+      snapshotReason: freezeReason,
+      session,
+    });
+  }
+  return unlocked;
 };
 
 /**
@@ -238,6 +294,9 @@ const bindPassToJob = async ({
   mongoClient,
   jobPassesStorage,
   savedJobsStorage,
+  mateyChatSessionsStorage,
+  messagesJobStorage,
+  shedToolsStorage,
   subscriptionStorage,
   offerAnalyticsStorage,
   auditLogger,
@@ -262,9 +321,27 @@ const bindPassToJob = async ({
       session,
     });
 
-    // If the buyer specified a jobId at checkout time, immediately consume
-    // one seat of the pass for that job and unlock it.
+    // If the buyer specified a jobId at checkout time, verify ownership before
+    // consuming a seat (ID tampering / foreign job must not unlock).
     if (targetJobId) {
+      const buyerAuth = {
+        userId: parsedEvent.userId || null,
+        userEmail: parsedEvent.userEmail || null,
+      };
+      const sessionOpts = buildSessionOptions(session);
+      const jobRow = sessionOpts ?
+        await savedJobsStorage.findOne({ jobId: targetJobId }, sessionOpts)
+      : await savedJobsStorage.findOne({ jobId: targetJobId });
+      if (!jobRow || jobRow.deletedAt != null) {
+        return { pass, savedJob: null, alreadyBound: false, status: 'job_not_found' };
+      }
+      if (!ownsSavedJob(jobRow, buyerAuth)) {
+        return { pass, savedJob: null, alreadyBound: false, status: 'owner_mismatch' };
+      }
+      if (jobRow.lockState === 'unlocked') {
+        return { pass, savedJob: jobRow, alreadyBound: true, status: 'already_bound' };
+      }
+
       const beforeRemaining = pass.packRemaining;
       const consumed = await consumePassForJob({
         jobPassesStorage,
@@ -276,12 +353,35 @@ const bindPassToJob = async ({
         pass = consumed;
         const savedJob = await unlockSavedJob({
           savedJobsStorage,
-          jobId: targetJobId,
+          jobDoc: jobRow,
           passId: pass.passId,
           paymentProvider: parsedEvent.paymentProvider,
           paymentId: parsedEvent.providerPaymentId,
           session,
+          mateyChatSessionsStorage,
+          messagesJobStorage,
+          shedToolsStorage,
+          freezeReason: 'payment_success',
         });
+        if (!savedJob) {
+          await rollbackPassConsumption({
+            jobPassesStorage,
+            passId: pass.passId,
+            jobId: targetJobId,
+            session,
+          });
+          const po = buildSessionOptions(session);
+          const passAfter =
+            (po ? await jobPassesStorage.findOne({ passId: pass.passId }, po) : await jobPassesStorage.findOne({ passId: pass.passId })) ||
+            pass;
+          return {
+            pass: passAfter,
+            savedJob: null,
+            alreadyBound: false,
+            status: 'unlock_failed',
+            beforeRemaining,
+          };
+        }
         return { pass, savedJob, alreadyBound: false, status: 'unlocked', beforeRemaining };
       }
       // Pass already had no remaining seats — likely a webhook replay after the
@@ -304,6 +404,49 @@ const bindPassToJob = async ({
     }
   } else {
     result = await runner(null);
+  }
+
+  /* Legacy / replay: job already unlocked but snapshot never frozen — freeze once if needed */
+  if (
+    targetJobId &&
+    mateyChatSessionsStorage &&
+    messagesJobStorage &&
+    shedToolsStorage !== undefined &&
+    savedJobsStorage &&
+    ['unlocked', 'already_bound'].includes(result.status) &&
+    result.savedJob
+  ) {
+    try {
+      const helpers = createSnapshotHelpers({ mateyChatSessionsStorage, messagesJobStorage, shedToolsStorage });
+      result.savedJob = await helpers.freezeSnapshotIfNotFrozen({
+        savedJobsStorage,
+        jobDoc: result.savedJob,
+        snapshotReason: 'payment_success',
+        session: null,
+      });
+    } catch (freezeErr) {
+      console.warn('bindPassToJob: freezeSnapshotIfNotFrozen failed:', freezeErr?.message || freezeErr);
+    }
+  }
+
+  const bindingFailureStatuses = new Set(['owner_mismatch', 'job_not_found', 'unlock_failed']);
+  if (bindingFailureStatuses.has(result.status) && offerAnalyticsStorage) {
+    try {
+      await offerAnalyticsStorage.insertOne({
+        eventName: 'job_pass_binding_failed',
+        userId: parsedEvent.userId || null,
+        userEmail: parsedEvent.userEmail || null,
+        jobId: targetJobId,
+        passId: result.pass?.passId || passId,
+        paymentProvider: parsedEvent.paymentProvider,
+        providerOrderId: parsedEvent.providerOrderId,
+        providerPaymentId: parsedEvent.providerPaymentId,
+        reason: result.status,
+        createdAt: new Date(),
+      });
+    } catch (logErr) {
+      console.warn('bindPassToJob: binding_failed log insert failed:', logErr?.message || logErr);
+    }
   }
 
   // Post-binding analytics + audit. Soft-fail so a failed analytics insert
@@ -365,7 +508,7 @@ const bindPassToJob = async ({
       }
     }
 
-    if (offerAnalyticsStorage && !hadCompletionAnalytics) {
+    if (offerAnalyticsStorage && !hadCompletionAnalytics && !bindingFailureStatuses.has(result.status)) {
       await offerAnalyticsStorage.insertOne({
         eventName:
           result.status === 'unlocked'
@@ -394,7 +537,12 @@ const bindPassToJob = async ({
   }
 
   try {
-    if (auditLogger && parsedEvent.providerPaymentId && !hadCompletionAnalytics) {
+    if (
+      auditLogger &&
+      parsedEvent.providerPaymentId &&
+      !hadCompletionAnalytics &&
+      !bindingFailureStatuses.has(result.status)
+    ) {
       await auditLogger.logAudit({
         action: result.status === 'unlocked' ? 'JOB_PASS_BOUND' : 'JOB_PASS_PURCHASED',
         resource: 'job_pass',

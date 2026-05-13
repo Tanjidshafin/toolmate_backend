@@ -21,6 +21,7 @@ const { createRequireAuth } = require('./auth-middleware');
 const paypalProvider = require('./payment-providers/paypal-provider');
 const { bindPassToJob } = require('./job-pass-bind');
 const { getPricingConfig, resolveOfferForCheckout } = require('./pricing-config');
+const { ownsSavedJob } = require('./saved-jobs-internal');
 
 const VALID_SKUS = new Set(['job_pass_single', 'job_pass_3pack']);
 
@@ -29,6 +30,9 @@ module.exports = ({
   subscriptionStorage,
   jobPassesStorage,
   savedJobsStorage,
+  mateyChatSessionsStorage,
+  messagesJobStorage,
+  shedToolsStorage,
   promoStorage,
   offerAnalyticsStorage,
   auditLogger,
@@ -83,9 +87,8 @@ module.exports = ({
       }
       if (jobId) {
         const job = await savedJobsStorage.findOne({ jobId });
-        if (!job) return res.status(404).json({ error: 'Saved job not found' });
-        if (job.userId && job.userId !== authUser.userId) {
-          return res.status(403).json({ error: 'Forbidden' });
+        if (!job || !ownsSavedJob(job, authUser)) {
+          return res.status(404).json({ error: 'Saved job not found' });
         }
       }
 
@@ -141,6 +144,7 @@ module.exports = ({
             userEmail: authUser.userEmail,
             jobId,
             passId,
+            providerOrderId: order.providerOrderId,
             productSku,
             paymentProvider: 'paypal',
             variant: offer.variant,
@@ -148,6 +152,8 @@ module.exports = ({
             currency: offer.currency,
             amount: offer.amount,
             triggerReason: req.body?.triggerReason || null,
+            analyticsSource: 'server_checkout',
+            trustedForFunnel: true,
             createdAt: new Date(),
           });
         } catch (err) {
@@ -226,12 +232,24 @@ module.exports = ({
         mongoClient,
         jobPassesStorage,
         savedJobsStorage,
+        mateyChatSessionsStorage,
+        messagesJobStorage,
+        shedToolsStorage,
         subscriptionStorage,
         offerAnalyticsStorage,
         auditLogger,
         parsedEvent: { ...parsed, userId: authUser.userId },
         rawEvent: { source: 'paypal_inpage_capture', orderId },
       });
+
+      const bindFailure = new Set(['owner_mismatch', 'job_not_found', 'unlock_failed']);
+      if (bindFailure.has(result.status)) {
+        return res.status(409).json({
+          success: false,
+          error: 'Job pass could not be bound to this saved job',
+          status: result.status,
+        });
+      }
 
       return res.json({
         success: true,
@@ -313,6 +331,9 @@ module.exports = ({
             mongoClient,
             jobPassesStorage,
             savedJobsStorage,
+            mateyChatSessionsStorage,
+            messagesJobStorage,
+            shedToolsStorage,
             subscriptionStorage,
             offerAnalyticsStorage,
             auditLogger,

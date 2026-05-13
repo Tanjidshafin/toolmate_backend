@@ -203,8 +203,14 @@ module.exports = ({ testimonialsStorage, auditLogger, getUserInfoFromRequest }) 
         userEmail: email,
       });
 
+      const normalizedStatus = existingTestimonial?.status || (existingTestimonial?.isVisible ? 'approved' : 'pending');
+
       res.status(200).send({
         hasReview: !!existingTestimonial,
+        hasApprovedReview: normalizedStatus === 'approved',
+        shouldSuppressInvite: normalizedStatus === 'approved',
+        status: normalizedStatus,
+        testimonialId: existingTestimonial?._id || null,
         testimonial: existingTestimonial || null,
       });
     } catch (err) {

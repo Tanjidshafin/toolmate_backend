@@ -21,6 +21,7 @@ const { createRequireAuth } = require('./auth-middleware');
 const stripeProvider = require('./payment-providers/stripe-provider');
 const { bindPassToJob } = require('./job-pass-bind');
 const { getPricingConfig, resolveOfferForCheckout } = require('./pricing-config');
+const { ownsSavedJob } = require('./saved-jobs-internal');
 
 const VALID_SKUS = new Set(['job_pass_single', 'job_pass_3pack']);
 /** Aligned with client chat session ids (UUID or session_* tokens); path-safe segment. */
@@ -31,6 +32,9 @@ module.exports = ({
   subscriptionStorage,
   jobPassesStorage,
   savedJobsStorage,
+  mateyChatSessionsStorage,
+  messagesJobStorage,
+  shedToolsStorage,
   promoStorage,
   offerAnalyticsStorage,
   auditLogger,
@@ -97,18 +101,35 @@ module.exports = ({
     }
   });
 
-  router.post('/api/job-pass/checkout-started', async (req, res) => {
+  router.post('/api/job-pass/checkout-started', requireAuth, async (req, res) => {
     try {
-      const { userId, jobId, productSku, paymentProvider, variant, providerPriceRef, currency, amount } = req.body || {};
+      const authUser = req.authUser;
+      if (!authUser?.userId) {
+        return res.status(401).json({ error: 'Unauthorized' });
+      }
+      const {
+        jobId,
+        productSku,
+        paymentProvider: bodyPaymentProvider,
+        provider: bodyProviderAlias,
+        variant,
+        providerPriceRef,
+        currency,
+        amount,
+      } = req.body || {};
+      const paymentProvider = bodyPaymentProvider || bodyProviderAlias || null;
       await trackEvent('job_pass_checkout_started', {
-        userId: userId || null,
+        userId: authUser.userId,
+        userEmail: authUser.userEmail || null,
         jobId: jobId || null,
         productSku: productSku || null,
-        paymentProvider: paymentProvider || null,
+        paymentProvider,
         variant: variant || null,
         providerPriceRef: providerPriceRef || null,
         currency: currency || 'AUD',
         amount: typeof amount === 'number' ? amount : null,
+        analyticsSource: 'client_authenticated',
+        trustedForFunnel: true,
       });
       return res.json({ success: true });
     } catch (err) {
@@ -132,9 +153,8 @@ module.exports = ({
       // Validate that the user actually owns the job they're trying to bind to.
       if (jobId) {
         const job = await savedJobsStorage.findOne({ jobId });
-        if (!job) return res.status(404).json({ error: 'Saved job not found' });
-        if (job.userId && job.userId !== authUser.userId) {
-          return res.status(403).json({ error: 'Forbidden: cannot pay for a job you do not own' });
+        if (!job || !ownsSavedJob(job, authUser)) {
+          return res.status(404).json({ error: 'Saved job not found' });
         }
         returnContext = 'chat';
         const cs = typeof rawChatSessionId === 'string' ? rawChatSessionId.trim() : '';
@@ -197,6 +217,7 @@ module.exports = ({
         userEmail: authUser.userEmail,
         jobId,
         passId,
+        providerOrderId: session.providerOrderId,
         productSku,
         paymentProvider: 'stripe',
         variant: offer.variant,
@@ -204,6 +225,8 @@ module.exports = ({
         currency: offer.currency,
         amount: offer.amount,
         triggerReason: req.body?.triggerReason || null,
+        analyticsSource: 'server_checkout',
+        trustedForFunnel: true,
       });
 
       return res.json({
@@ -267,10 +290,19 @@ module.exports = ({
       if (parsed.userEmail && authUser.userEmail && parsed.userEmail.toLowerCase() !== authUser.userEmail.toLowerCase()) {
         return res.status(403).json({ error: 'Cannot recover a session that belongs to another user' });
       }
+      if (parsed.jobId) {
+        const jobRow = await savedJobsStorage.findOne({ jobId: parsed.jobId });
+        if (!jobRow || !ownsSavedJob(jobRow, authUser)) {
+          return res.status(403).json({ error: 'Cannot recover: saved job not found or access denied' });
+        }
+      }
       const result = await bindPassToJob({
         mongoClient,
         jobPassesStorage,
         savedJobsStorage,
+        mateyChatSessionsStorage,
+        messagesJobStorage,
+        shedToolsStorage,
         subscriptionStorage,
         offerAnalyticsStorage,
         auditLogger,
@@ -280,6 +312,13 @@ module.exports = ({
         },
         rawEvent: { source: 'success_page_recover', sessionId },
       });
+      const bindFailure = new Set(['owner_mismatch', 'job_not_found', 'unlock_failed']);
+      if (bindFailure.has(result.status)) {
+        return res.status(409).json({
+          error: 'Job pass could not be bound to this saved job',
+          status: result.status,
+        });
+      }
       return res.json({
         success: true,
         passId: result.pass?.passId,

@@ -22,7 +22,7 @@ const buildSafeOrigin = (origin) => {
 
 /**
  * @param {'pricing'|'chat'} returnContext
- * @param {string|null|undefined} chatSessionId — required when returnContext is 'chat'
+ * @param {string|null|undefined} chatSessionId 
  */
 const buildJobPassStripeUrls = ({ safeOrigin, returnContext, chatSessionId, jobId }) => {
   const jobParam = encodeURIComponent(jobId || '');
@@ -34,6 +34,7 @@ const buildJobPassStripeUrls = ({ safeOrigin, returnContext, chatSessionId, jobI
     const seg = encodeURIComponent(chatSessionId.trim());
     return {
       success_url: `${safeOrigin}/chat/${seg}?success=true&session_id=${sessionPlaceholder}&job_id=${jobParam}`,
+      // Cancel does not hit the server: user returns with draft still locked (no bind/unlock).
       cancel_url: `${safeOrigin}/chat/${seg}?job_pass_cancel=1`,
     };
   }

@@ -1,0 +1,76 @@
+{
+  "cases": [
+    {
+      "id": "strong_two_signals",
+      "description": "Shopping list + useful next step → meaningful",
+      "sessionDoc": {
+        "sessionId": "sess-strong",
+        "title": "Install floating shelves in the lounge",
+        "userMessageCount": 2,
+        "mateyMessageCount": 2,
+        "jobState": {
+          "savedShoppingList": { "mustBuy": ["cordless drill", "spirit level"] },
+          "stageTracker": { "nextDecision": "Mark stud positions before drilling" }
+        },
+        "totalSuggestedTools": 0,
+        "totalImageAttachments": 0
+      },
+      "jobNameFromRequest": null,
+      "expectReady": true
+    },
+    {
+      "id": "thin_title",
+      "description": "Generic title fails valid_title",
+      "sessionDoc": {
+        "sessionId": "sess-thin",
+        "title": "new chat",
+        "userMessageCount": 2,
+        "mateyMessageCount": 2,
+        "jobState": {
+          "savedShoppingList": { "mustBuy": ["paint"] },
+          "stageTracker": { "nextDecision": "Sand between coats" }
+        },
+        "totalSuggestedTools": 0,
+        "totalImageAttachments": 0
+      },
+      "jobNameFromRequest": null,
+      "expectReady": false
+    },
+    {
+      "id": "scoped_chat_missing",
+      "description": "No matey reply yet",
+      "sessionDoc": {
+        "sessionId": "sess-scope",
+        "title": "Repair leaking laundry tap properly",
+        "userMessageCount": 1,
+        "mateyMessageCount": 0,
+        "jobState": {
+          "savedShoppingList": { "mustBuy": ["adjustable spanner"] },
+          "stageTracker": { "nextDecision": "Isolate water" }
+        },
+        "totalSuggestedTools": 0,
+        "totalImageAttachments": 0
+      },
+      "jobNameFromRequest": null,
+      "expectReady": false
+    },
+    {
+      "id": "override_title_ok",
+      "description": "Request title overrides bad session title",
+      "sessionDoc": {
+        "sessionId": "sess-override",
+        "title": "great question",
+        "userMessageCount": 2,
+        "mateyMessageCount": 2,
+        "jobState": {
+          "savedShoppingList": { "mustBuy": ["silicone", "caulk gun"] },
+          "stageTracker": { "nextDecision": "Cut old sealant cleanly" }
+        },
+        "totalSuggestedTools": 0,
+        "totalImageAttachments": 0
+      },
+      "jobNameFromRequest": "Reseal shower cubicle frame",
+      "expectReady": true
+    }
+  ]
+}

@@ -341,6 +341,10 @@ async function run() {
       // as present and triggers E11000 on the second draft save.
       ensureSavedJobsPassIdIndex(savedJobsStorage),
       savedJobsStorage.createIndex({ lockState: 1, userId: 1 }),
+      savedJobsStorage.createIndex(
+        { snapshotFrozenAt: 1 },
+        { sparse: true },
+      ),
       // Job Passes — purchase ledger. Provider-agnostic uniqueness so Stripe and
       // PayPal share one collection and webhook-replay is safe.
       jobPassesStorage.createIndex({ passId: 1 }, { unique: true }),

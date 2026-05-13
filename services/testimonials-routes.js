@@ -228,7 +228,7 @@ module.exports = ({ testimonialsStorage, auditLogger, getUserInfoFromRequest }) 
       return res.json({
         hasReview,
         hasApprovedReview,
-        shouldSuppressInvite: hasReview,
+        shouldSuppressInvite: hasApprovedReview,
         status: normalized.status,
         testimonialId: normalized._id,
         createdAt: normalized.createdAt,

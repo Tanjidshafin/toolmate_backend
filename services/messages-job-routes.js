@@ -8,6 +8,17 @@ const DEFAULT_PAGE_SIZE = CURSOR_DATA_SIZE;
 const MAX_PAGE_SIZE = 100;
 const DEFAULT_TITLE = 'New Chat';
 
+const {
+  mergeShoppingItems,
+  projectShoppingItemsToLists,
+  reconstructShoppingItemsFromSavedList,
+  canonicalizeShoppingItem,
+  inferShoppingCategory,
+  defaultSurfaceState,
+  normalizeSurfaceStatePatch,
+  mergeSurfaceEntry,
+} = require('./messages-job-helpers');
+
 const hasMessageContent = (value) => typeof value === 'string' && value.trim().length > 0;
 const isMeaningfulText = (value) => typeof value === 'string' && value.trim().length > 8;
 
@@ -77,23 +88,15 @@ const DECISION_FIELD_LABELS = {
   ownedToolsConfirmed: 'Owned tools confirmed',
   measurementsConfirmed: 'Measurements confirmed',
 };
-const SHOPPING_CATEGORY_PATTERNS = [
-  { category: 'PPE', regex: /\b(safety specs|safety glasses|goggles|gloves|respirator|dust mask|ear protection)\b/i },
-  { category: 'fastener', regex: /\b(screws?|nails?|bolts?)\b/i },
-  { category: 'fixing', regex: /\b(wall plugs?|anchors?|anchor bolts?)\b/i },
-  { category: 'consumable', regex: /\b(sandpaper|blades?|adhesive|sealant|tape|filler|paint|primer|caulk)\b/i },
-  { category: 'material', regex: /\b(joint compound|plaster patch|compound|primer|filler|sealant|paint)\b/i },
-  { category: 'tool', regex: /\b(drill|driver|knife|hammer|screwdriver|sander|taping knife|level)\b/i },
-  { category: 'rental', regex: /\b(rent|rental|hire|borrow)\b/i },
-];
 const SHOPPING_ITEM_REGEX =
-  /\b(joint compound|plaster patch|taping knife|sandpaper|primer|safety specs|safety glasses|goggles|dust mask|gloves|respirator|drill|hammer drill|drill bits?|masonry bits?|screws?|wall plugs?|anchors?|adhesive|sealant|tape|filler|paint|caulk|blades?|ear protection|sanding block)\b/gi;
+  /\b(joint compound|plaster patch|taping knife|sandpaper|primer|safety specs|safety glasses|goggles|dust mask|p2 mask|gloves|respirator|drill|hammer drill|drill bits?|masonry bits?|screws?|wall plugs?|anchors?|adhesive|sealant|tape|filler|paint|caulk|blades?|ear protection|sanding block|adapter|attachment|extension cord|extension|charger|battery pack|battery)\b/gi;
 
 const inferShoppingStatus = (content, itemName) => {
   const lowered = content.toLowerCase();
   const item = itemName.toLowerCase();
   const aroundItemRegex = new RegExp(`(.{0,40}${escapeRegex(item)}.{0,40})`, 'i');
   const local = (lowered.match(aroundItemRegex)?.[0] || lowered).toLowerCase();
+  if (/\b(don['’]?t need|not needed|no need|won['’]?t need|skip|avoid buying)\b/.test(local)) return 'not_needed';
   if (/\b(safety|ppe|goggles|mask|respirator|gloves|ear protection)\b/.test(item)) return 'safety';
   if (/\b(hire|rent|borrow)\b/.test(local)) return 'hire_or_borrow';
   if (/\b(optional|better option|worth upgrading|upgrade|cleaner finish)\b/.test(local)) return 'optional';
@@ -102,22 +105,15 @@ const inferShoppingStatus = (content, itemName) => {
   return 'must_buy';
 };
 
-const inferShoppingCategory = (itemName) => {
-  for (const matcher of SHOPPING_CATEGORY_PATTERNS) {
-    if (matcher.regex.test(itemName)) return matcher.category;
-  }
-  return 'unknown';
-};
-
 const buildShoppingItemsFromAssistant = (content, previousItems = []) => {
   const source = typeof content === 'string' ? content : '';
   if (!source.trim()) return normalizeArray(previousItems);
   const nextByKey = new Map();
   normalizeArray(previousItems).forEach((entry) => {
     if (!entry || typeof entry !== 'object') return;
-    const item = normalizeText(entry.item || entry.name || '');
+    const item = canonicalizeShoppingItem(entry.item || entry.name || '');
     if (!item) return;
-    nextByKey.set(item.toLowerCase(), {
+    nextByKey.set(item, {
       item,
       category: entry.category || inferShoppingCategory(item),
       status: entry.status || 'must_buy',
@@ -127,9 +123,9 @@ const buildShoppingItemsFromAssistant = (content, previousItems = []) => {
 
   const matches = source.match(SHOPPING_ITEM_REGEX) || [];
   matches.forEach((rawMatch) => {
-    const item = normalizeText(rawMatch);
+    const item = canonicalizeShoppingItem(rawMatch);
     if (!item) return;
-    const key = item.toLowerCase();
+    const key = item;
     const status = inferShoppingStatus(source, item);
     const existing = nextByKey.get(key);
     nextByKey.set(key, {
@@ -141,66 +137,6 @@ const buildShoppingItemsFromAssistant = (content, previousItems = []) => {
   });
 
   return Array.from(nextByKey.values());
-};
-
-const projectShoppingItemsToLists = (items = [], alreadyOwnedFallback = []) => {
-  const lists = {
-    mustBuy: [],
-    alreadyOwned: normalizeStringArray(alreadyOwnedFallback),
-    optionalUpgrades: [],
-    consumables: [],
-    safety: [],
-    hireOrBorrow: [],
-  };
-  const byStatusKey = new Map();
-  normalizeArray(items).forEach((entry) => {
-    const item = normalizeText(entry.item || entry.name || '');
-    if (!item) return;
-    byStatusKey.set(item.toLowerCase(), item);
-    switch (entry.status) {
-      case 'already_owned':
-        lists.alreadyOwned.push(item);
-        break;
-      case 'optional':
-        lists.optionalUpgrades.push(item);
-        break;
-      case 'consumable':
-        lists.consumables.push(item);
-        break;
-      case 'safety':
-        lists.safety.push(item);
-        break;
-      case 'hire_or_borrow':
-        lists.hireOrBorrow.push(item);
-        break;
-      default:
-        lists.mustBuy.push(item);
-        break;
-    }
-  });
-
-  Object.keys(lists).forEach((key) => {
-    lists[key] = Array.from(new Set(lists[key].map((item) => item.trim()).filter(Boolean)));
-  });
-  return lists;
-};
-
-const mergeShoppingItems = (...itemGroups) => {
-  const merged = new Map();
-  itemGroups.forEach((group) => {
-    normalizeArray(group).forEach((entry) => {
-      if (!entry || typeof entry !== 'object') return;
-      const item = normalizeText(entry.item || entry.name || '');
-      if (!item) return;
-      merged.set(item.toLowerCase(), {
-        item,
-        category: entry.category || inferShoppingCategory(item),
-        status: entry.status || 'must_buy',
-        reason: entry.reason || '',
-      });
-    });
-  });
-  return Array.from(merged.values());
 };
 
 const toToolName = (tool) => {
@@ -339,7 +275,8 @@ const buildDerivedJobState = ({
   const normalizedOwnedToolNames = normalizeStringArray(shedToolNames).map((name) => normalizeToolText(name));
   const ownedTokenSets = normalizedOwnedToolNames.map((name) => new Set(toMeaningfulTokens(name)));
   const isCoveredByShed = (suggestedName) => {
-    const normalizedSuggested = normalizeToolText(suggestedName);
+    const canon = canonicalizeShoppingItem(suggestedName) || suggestedName;
+    const normalizedSuggested = normalizeToolText(canon);
     if (!normalizedSuggested) return false;
     const suggestedTokens = toMeaningfulTokens(normalizedSuggested);
     return normalizedOwnedToolNames.some((ownedName, idx) => {
@@ -364,7 +301,11 @@ const buildDerivedJobState = ({
   const nonOptionalMissing = recommendationMissing.filter((name) => !optionalHelpful.includes(name));
   const mustBuy = nonOptionalMissing.filter((name) => classifyToolName(name) === 'mustBuy');
   const consumables = nonOptionalMissing.filter((name) => classifyToolName(name) === 'consumables');
-  const previousShoppingItems = normalizeArray(previous.savedShoppingList?.items);
+  const previousShoppingItems = (() => {
+    const explicitItems = normalizeArray(previous.savedShoppingList?.items);
+    if (explicitItems.length > 0) return explicitItems;
+    return reconstructShoppingItemsFromSavedList(previous.savedShoppingList || {});
+  })();
   const assistantDerivedItems = buildShoppingItemsFromAssistant(messageDoc.content, previousShoppingItems);
   const mergedToolItems = [
     ...assistantDerivedItems,
@@ -374,7 +315,11 @@ const buildDerivedJobState = ({
     ...optionalHelpful.map((name) => ({ item: name, category: inferShoppingCategory(name), status: 'optional' })),
   ];
   const uniqueMergedItems = mergeShoppingItems(assistantDerivedItems, mergedToolItems);
-  const projectedShopping = projectShoppingItemsToLists(uniqueMergedItems, alreadyOwned);
+  const projectedShopping = projectShoppingItemsToLists(
+    uniqueMergedItems,
+    alreadyOwned,
+    previous.savedShoppingList || {},
+  );
 
   const nextStage = metadata.currentStage || inferStageFromContent(messageDoc.content, previousStage.currentStage);
   const previousWeight = STAGE_WEIGHT[previousStage.currentStage] ?? 0;
@@ -404,6 +349,7 @@ const buildDerivedJobState = ({
       consumables: projectedShopping.consumables,
       safety: projectedShopping.safety,
       hireOrBorrow: projectedShopping.hireOrBorrow,
+      notNeeded: projectedShopping.notNeeded,
       items: uniqueMergedItems,
       estimatedSpendByBudgetTier: estimateSpendByBudgetTier(
         normalizeArray(messageDoc.suggestedTools),
@@ -764,6 +710,7 @@ module.exports = ({
             mateyMessageCount: 0,
             totalSuggestedTools: 0,
             totalImageAttachments: 0,
+            surfaceState: defaultSurfaceState(),
           },
           $set: {
             updatedAt: now,
@@ -1076,7 +1023,7 @@ module.exports = ({
       const savedShoppingList =
         jobState.savedShoppingList && typeof jobState.savedShoppingList === 'object' ? jobState.savedShoppingList : {};
       const existingItems = normalizeArray(savedShoppingList.items);
-      const normalizedItem = normalizeText(item);
+      const normalizedItem = canonicalizeShoppingItem(item);
       let nextItems = mergeShoppingItems(existingItems);
 
       if (action === 'remove') {
@@ -1090,6 +1037,16 @@ module.exports = ({
             status: nextStatus,
             category: nextCategory,
             reason: 'Updated by user',
+          },
+        ]);
+      } else if (action === 'mark_owned' && normalizedItem) {
+        const nextCategory = normalizeText(category) || inferShoppingCategory(normalizedItem);
+        nextItems = mergeShoppingItems(nextItems, [
+          {
+            item: normalizedItem,
+            status: 'already_owned',
+            category: nextCategory,
+            reason: 'Marked owned by user',
           },
         ]);
       } else {
@@ -1107,6 +1064,7 @@ module.exports = ({
           consumables: projected.consumables,
           safety: projected.safety,
           hireOrBorrow: projected.hireOrBorrow,
+          notNeeded: projected.notNeeded,
           items: nextItems,
         },
         updatedAt: new Date(),
@@ -1126,6 +1084,57 @@ module.exports = ({
     } catch (error) {
       console.error('Error updating shopping list:', error);
       return res.status(500).json({ error: 'Failed to update shopping list' });
+    }
+  });
+
+  router.patch('/chat/sessions/:sessionId/surface-state', requireAuth, async (req, res) => {
+    try {
+      const { sessionId } = req.params;
+      if (!sessionId || typeof sessionId !== 'string') {
+        return res.status(400).json({ error: 'sessionId is required' });
+      }
+      const parsed = normalizeSurfaceStatePatch(req.body || {});
+      if (parsed.error) {
+        return res.status(400).json({ error: parsed.error });
+      }
+      const access = await ensureSessionAccess({
+        sessionId,
+        authUser: req.authUser,
+        allowMissing: false,
+        claimUnowned: false,
+      });
+      if (access.error) {
+        return res.status(access.error.status).json({ error: access.error.message });
+      }
+      const sessionDoc = access.sessionDoc;
+      const prevSurface =
+        sessionDoc.surfaceState && typeof sessionDoc.surfaceState === 'object'
+          ? sessionDoc.surfaceState
+          : defaultSurfaceState();
+      const surfaceKey = parsed.surface;
+      const prevEntry = prevSurface[surfaceKey] || { dismissed: false };
+      const nextEntry = mergeSurfaceEntry(prevEntry, {
+        action: parsed.action,
+        openedBy: parsed.openedBy,
+      });
+      const nextSurface = {
+        ...prevSurface,
+        [surfaceKey]: nextEntry,
+      };
+      const now = new Date();
+      await mateyChatSessionsStorage.updateOne(
+        { sessionId },
+        {
+          $set: {
+            surfaceState: nextSurface,
+            updatedAt: now,
+          },
+        },
+      );
+      return res.json({ success: true, sessionId, surfaceState: nextSurface });
+    } catch (error) {
+      console.error('Error updating surface state:', error);
+      return res.status(500).json({ error: 'Failed to update surface state' });
     }
   });
 
@@ -1177,6 +1186,7 @@ module.exports = ({
           userEmail: 1,
           userId: 1,
           jobState: 1,
+          surfaceState: 1,
         })
         .sort({ lastMessageAt: -1, updatedAt: -1, createdAt: -1 })
         .limit(pageSize)

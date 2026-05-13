@@ -1,6 +1,7 @@
 const express = require('express');
 const { ObjectId } = require('mongodb');
 const { getAdminActorFromRequest } = require('./admin-actor');
+const { normalizeRagRiskLevel } = require('./rag-risk-alias');
 module.exports = ({
   ragSystemStorage,
   shedToolsStorage,
@@ -287,11 +288,12 @@ module.exports = ({
         suppressed: { $ne: true },
       };
 
-      if (risk_level) {
+      const requestedRisk = normalizeRagRiskLevel(risk_level);
+      if (requestedRisk) {
         let riskLevelsToInclude = [];
-        if (risk_level === 'Low') riskLevelsToInclude = ['Low'];
-        else if (risk_level === 'Medium') riskLevelsToInclude = ['Low', 'Medium'];
-        else if (risk_level === 'Hard') riskLevelsToInclude = ['Low', 'Medium', 'Hard'];
+        if (requestedRisk === 'Low') riskLevelsToInclude = ['Low'];
+        else if (requestedRisk === 'Medium') riskLevelsToInclude = ['Low', 'Medium'];
+        else if (requestedRisk === 'Hard') riskLevelsToInclude = ['Low', 'Medium', 'Hard'];
 
         if (riskLevelsToInclude.length > 0) {
           initialMatchQuery.risk_level = { $in: riskLevelsToInclude };

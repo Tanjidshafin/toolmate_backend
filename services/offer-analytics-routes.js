@@ -120,32 +120,81 @@ module.exports = ({ offerAnalyticsStorage, jobPassesStorage, savedJobsStorage })
         job_pass_binding_failed: 'binding_failures',
       };
 
-      const stageRows = await offerAnalyticsStorage
-        .aggregate([{ $match: baseMatch }, { $group: { _id: '$eventName', count: { $sum: 1 } } }])
-        .toArray();
+      const [stageRows, dedupedCheckoutStarted, providerDedupedStart, variantDedupedStart] = await Promise.all([
+        offerAnalyticsStorage.aggregate([{ $match: baseMatch }, { $group: { _id: '$eventName', count: { $sum: 1 } } }]).toArray(),
+        offerAnalyticsStorage
+          .aggregate([
+            { $match: { ...baseMatch, eventName: 'job_pass_checkout_started' } },
+            {
+              $group: {
+                _id: {
+                  passId: { $ifNull: ['$passId', ''] },
+                  providerOrderId: { $ifNull: ['$providerOrderId', ''] },
+                },
+              },
+            },
+            { $count: 'c' },
+          ])
+          .toArray(),
+        offerAnalyticsStorage
+          .aggregate([
+            { $match: { ...baseMatch, eventName: 'job_pass_checkout_started' } },
+            {
+              $group: {
+                _id: {
+                  provider: { $ifNull: ['$paymentProvider', 'stripe'] },
+                  passId: { $ifNull: ['$passId', ''] },
+                  providerOrderId: { $ifNull: ['$providerOrderId', ''] },
+                },
+              },
+            },
+            { $group: { _id: '$_id.provider', count: { $sum: 1 } } },
+          ])
+          .toArray(),
+        offerAnalyticsStorage
+          .aggregate([
+            { $match: { ...baseMatch, eventName: 'job_pass_checkout_started' } },
+            {
+              $group: {
+                _id: {
+                  variant: { $ifNull: ['$variant', 'unknown'] },
+                  passId: { $ifNull: ['$passId', ''] },
+                  providerOrderId: { $ifNull: ['$providerOrderId', ''] },
+                },
+              },
+            },
+            { $group: { _id: '$_id.variant', count: { $sum: 1 } } },
+          ])
+          .toArray(),
+      ]);
 
       const totals = { ...emptySummary.totals };
       for (const row of stageRows) {
         const key = EVENT_KEY_MAP[row._id];
-        if (key) totals[key] += row.count;
+        if (key && key !== 'checkout_started') totals[key] += row.count;
       }
+      totals.checkout_started = dedupedCheckoutStarted[0]?.c || 0;
 
       const providerRows = await offerAnalyticsStorage
         .aggregate([
           {
             $match: {
               ...baseMatch,
-              eventName: { $in: ['job_pass_checkout_started', 'job_pass_checkout_completed', 'job_pass_binding_failed'] },
+              eventName: { $in: ['job_pass_checkout_completed', 'job_pass_binding_failed'] },
             },
           },
           { $group: { _id: { provider: '$paymentProvider', stage: '$eventName' }, count: { $sum: 1 } } },
         ])
         .toArray();
       const byProvider = JSON.parse(JSON.stringify(emptySummary.byProvider));
+      for (const row of providerDedupedStart) {
+        const key = row._id || 'stripe';
+        if (!byProvider[key]) byProvider[key] = { checkout_started: 0, checkout_completed: 0, binding_failures: 0 };
+        byProvider[key].checkout_started = row.count || 0;
+      }
       for (const row of providerRows) {
         const key = row._id.provider || 'stripe';
         if (!byProvider[key]) byProvider[key] = { checkout_started: 0, checkout_completed: 0, binding_failures: 0 };
-        if (row._id.stage === 'job_pass_checkout_started') byProvider[key].checkout_started = row.count;
         if (row._id.stage === 'job_pass_checkout_completed') byProvider[key].checkout_completed = row.count;
         if (row._id.stage === 'job_pass_binding_failed') byProvider[key].binding_failures = row.count;
       }
@@ -153,16 +202,20 @@ module.exports = ({ offerAnalyticsStorage, jobPassesStorage, savedJobsStorage })
       const variantRows = await offerAnalyticsStorage
         .aggregate([
           {
-            $match: { ...baseMatch, eventName: { $in: ['job_pass_checkout_started', 'job_pass_checkout_completed'] } },
+            $match: { ...baseMatch, eventName: 'job_pass_checkout_completed' },
           },
           { $group: { _id: { variant: '$variant', stage: '$eventName' }, count: { $sum: 1 } } },
         ])
         .toArray();
       const byVariant = {};
+      for (const row of variantDedupedStart) {
+        const key = row._id || 'unknown';
+        if (!byVariant[key]) byVariant[key] = { checkout_started: 0, checkout_completed: 0 };
+        byVariant[key].checkout_started = row.count || 0;
+      }
       for (const row of variantRows) {
         const key = row._id.variant || 'unknown';
         if (!byVariant[key]) byVariant[key] = { checkout_started: 0, checkout_completed: 0 };
-        if (row._id.stage === 'job_pass_checkout_started') byVariant[key].checkout_started = row.count;
         if (row._id.stage === 'job_pass_checkout_completed') byVariant[key].checkout_completed = row.count;
       }
 

@@ -717,17 +717,45 @@ module.exports = (dependencies) => {
           ])
           .toArray(),
         offerAnalyticsStorage
-          ? offerAnalyticsStorage
-              .aggregate([
-                {
-                  $match: {
-                    eventName: { $in: ['job_pass_checkout_started', 'job_pass_binding_failed'] },
-                    createdAt: { $gte: start, $lte: end },
+          ? Promise.all([
+              offerAnalyticsStorage
+                .aggregate([
+                  {
+                    $match: {
+                      eventName: 'job_pass_binding_failed',
+                      createdAt: { $gte: start, $lte: end },
+                    },
                   },
-                },
-                { $group: { _id: '$eventName', count: { $sum: 1 } } },
-              ])
-              .toArray()
+                  { $group: { _id: null, count: { $sum: 1 } } },
+                ])
+                .toArray(),
+              offerAnalyticsStorage
+                .aggregate([
+                  {
+                    $match: {
+                      eventName: 'job_pass_checkout_started',
+                      createdAt: { $gte: start, $lte: end },
+                    },
+                  },
+                  {
+                    $group: {
+                      _id: {
+                        passId: { $ifNull: ['$passId', ''] },
+                        providerOrderId: { $ifNull: ['$providerOrderId', ''] },
+                      },
+                    },
+                  },
+                  { $count: 'c' },
+                ])
+                .toArray(),
+            ]).then(([failRows, startRows]) => {
+              const bindingFailures = failRows[0]?.count || 0;
+              const checkoutStarted = startRows[0]?.c || 0;
+              return [
+                { _id: 'job_pass_checkout_started', count: checkoutStarted },
+                { _id: 'job_pass_binding_failed', count: bindingFailures },
+              ];
+            })
           : Promise.resolve([]),
       ]);
 
@@ -858,6 +886,9 @@ module.exports = (dependencies) => {
                 mongoClient,
                 jobPassesStorage,
                 savedJobsStorage,
+                mateyChatSessionsStorage,
+                messagesJobStorage,
+                shedToolsStorage,
                 subscriptionStorage,
                 offerAnalyticsStorage,
                 auditLogger,

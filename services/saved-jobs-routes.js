@@ -11,17 +11,9 @@
  *   unlocked  → set by the Stripe/PayPal webhook bind, or by an active
  *               Best Mates subscription, or by manual admin override
  *
- * Endpoints implemented here:
- *   POST   /jobs/save               body: { sourceSessionId, jobName?, jobType? }
- *   GET    /jobs                    list current user's saved jobs (preview-aware)
- *   GET    /jobs/:jobId             full job (lock-state aware)
- *   PATCH  /jobs/:jobId             update editable fields (entitlement-gated)
- *   POST   /jobs/:jobId/resume      bumps lastResumedAt + emits analytics
- *   POST   /jobs/:jobId/unlock      consume an existing pack pass for this job
- *   DELETE /jobs/:jobId             soft delete
- *
- * Admin-only endpoints (mounted under /admin/...) live alongside the
- * admin pricing config in the admin services so this file stays user-scoped.
+ * Frozen snapshot: after unlock/payment, saved job content does NOT re-sync
+ * from the source chat on GET list/read or POST resume — only explicit save
+ * (draft) or PATCH updates change snapshot fields.
  */
 
 const express = require('express');
@@ -29,6 +21,8 @@ const { randomUUID } = require('crypto');
 const { createRequireAuth } = require('./auth-middleware');
 const { getJobEntitlement } = require('./subscription-status');
 const { consumePassForJob, unlockSavedJob } = require('./job-pass-bind');
+const { ownsSavedJob, ownsChatSession, isMeaningfulDraftFromSession, computeSaveReadiness } = require('./saved-jobs-internal');
+const { createSnapshotHelpers } = require('./saved-jobs-snapshot');
 
 const PREVIEWABLE_FIELDS = [
   'jobId',
@@ -49,12 +43,11 @@ const PREVIEWABLE_FIELDS = [
   'lastResumedAt',
   'resumeCount',
   'unlockedAt',
+  'snapshotFrozenAt',
+  'snapshotVersion',
 ];
 
 const isString = (v) => typeof v === 'string';
-const normalizeText = (value) => (typeof value === 'string' ? value.trim() : '');
-const normalizeToolKey = (value) => normalizeText(value).toLowerCase().replace(/\s+/g, ' ');
-
 const truncate = (value, max = 320) => {
   if (typeof value !== 'string') return value;
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
@@ -66,7 +59,6 @@ const toPublicJob = (doc, { unlocked }) => {
     const { _id, ...rest } = doc;
     return rest;
   }
-  // Locked preview — strip fields that contain the paid value.
   const preview = {};
   for (const key of PREVIEWABLE_FIELDS) {
     if (key in doc) preview[key] = doc[key];
@@ -80,7 +72,6 @@ const toPublicJob = (doc, { unlocked }) => {
   return preview;
 };
 
-/** Masks paid fields and attaches entitlement for UI (Resume vs Unlock) without writing to DB. */
 const jobToClientShape = (doc, entitlement) => {
   if (!doc) return null;
   const publicJob = toPublicJob(doc, { unlocked: entitlement.unlocked });
@@ -89,28 +80,6 @@ const jobToClientShape = (doc, entitlement) => {
     entitlement,
     canResume: Boolean(entitlement.unlocked),
   };
-};
-
-const buildShortlistFromJobState = (jobState = {}) => {
-  const list = [];
-  const sl = jobState.savedShoppingList || {};
-  if (Array.isArray(sl.mustBuy)) sl.mustBuy.forEach((n) => list.push({ name: n, group: 'must_buy' }));
-  if (Array.isArray(sl.consumables)) sl.consumables.forEach((n) => list.push({ name: n, group: 'consumables' }));
-  if (Array.isArray(sl.optionalUpgrades))
-    sl.optionalUpgrades.forEach((n) => list.push({ name: n, group: 'optional' }));
-  if (Array.isArray(sl.safety)) sl.safety.forEach((n) => list.push({ name: n, group: 'safety' }));
-  if (Array.isArray(sl.hireOrBorrow)) sl.hireOrBorrow.forEach((n) => list.push({ name: n, group: 'hire_or_borrow' }));
-  return list;
-};
-
-const buildNextStepsFromJobState = (jobState = {}) => {
-  const next = [];
-  const stage = jobState.stageTracker || {};
-  if (stage.nextDecision) next.push({ label: stage.nextDecision, source: 'next_decision' });
-  if (Array.isArray(jobState.missingItems?.missing)) {
-    jobState.missingItems.missing.forEach((item) => next.push({ label: `Get: ${item}`, source: 'missing' }));
-  }
-  return next;
 };
 
 module.exports = ({
@@ -125,6 +94,12 @@ module.exports = ({
 }) => {
   const router = express.Router();
   const requireAuth = createRequireAuth({ usersStorage });
+
+  const snap = createSnapshotHelpers({
+    mateyChatSessionsStorage,
+    messagesJobStorage,
+    shedToolsStorage,
+  });
 
   const loadActivePassesForUser = async (userId, userEmail) => {
     if (!jobPassesStorage) return [];
@@ -160,175 +135,31 @@ module.exports = ({
     return existingBoundJob ? null : passId;
   };
 
-  const snapshotShedTools = async (userId, userEmail) => {
-    if (!shedToolsStorage) return [];
-    const candidateUserIds = [userId, userEmail].filter(Boolean);
-    if (candidateUserIds.length === 0) return [];
-    const tools = await shedToolsStorage
-      .find({ user_id: { $in: candidateUserIds }, collection: { $ne: 'shed_analytics' } })
-      .project({ name: 1, category: 1, source: 1, originalPhrase: 1 })
-      .toArray();
-    return tools.map((t) => ({
-      name: t.name,
-      category: t.category,
-      source: t.source,
-      originalPhrase: t.originalPhrase,
-    }));
-  };
+  router.get('/jobs/save-readiness', requireAuth, async (req, res) => {
+    try {
+      const authUser = req.authUser;
+      if (!authUser?.userId) return res.status(401).json({ error: 'Unauthorized' });
+      const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId.trim() : '';
+      if (!sessionId) return res.status(400).json({ error: 'sessionId is required' });
 
-  const collectImageRefsFromSession = async (sessionId) => {
-    if (!messagesJobStorage || !sessionId) return [];
-    const messagesWithImages = await messagesJobStorage
-      .find({ sessionId, images: { $exists: true, $ne: [] } })
-      .project({ images: 1, createdAt: 1 })
-      .sort({ createdAt: 1 })
-      .toArray();
-    const refsByUrl = new Map();
-    for (const msg of messagesWithImages) {
-      if (!Array.isArray(msg.images)) continue;
-      for (const url of msg.images) {
-        if (typeof url === 'string' && url.trim()) {
-          const normalizedUrl = url.trim();
-          if (!refsByUrl.has(normalizedUrl)) {
-            refsByUrl.set(normalizedUrl, { url: normalizedUrl, capturedAt: msg.createdAt });
-          }
-        }
+      const sessionDoc = await mateyChatSessionsStorage.findOne({ sessionId });
+      if (!sessionDoc) return res.status(404).json({ error: 'Session not found' });
+      if (!ownsChatSession(sessionDoc, authUser)) {
+        return res.status(403).json({ error: 'Forbidden' });
       }
-    }
-    return Array.from(refsByUrl.values());
-  };
 
-  const collectSuggestedToolsFromSession = async (sessionId) => {
-    if (!messagesJobStorage || !sessionId) return [];
-    const rows = await messagesJobStorage
-      .find({ sessionId, suggestedTools: { $exists: true, $ne: [] } })
-      .project({ suggestedTools: 1 })
-      .sort({ createdAt: 1 })
-      .toArray();
-
-    const toolsByName = new Map();
-    for (const row of rows) {
-      if (!Array.isArray(row.suggestedTools)) continue;
-      for (const tool of row.suggestedTools) {
-        const candidateName = normalizeText(
-          typeof tool === 'string' ?
-            tool
-          : tool?.name ||
-            tool?.display_name ||
-            tool?.product_name ||
-            tool?.tool_name ||
-            tool?.toolName ||
-            tool?.productName ||
-            tool?.title ||
-            tool?.label,
-        );
-        if (!candidateName) continue;
-        const key = normalizeToolKey(candidateName);
-        if (!key) continue;
-        const existing = toolsByName.get(key) || {};
-        toolsByName.set(key, {
-          name: existing.name || candidateName,
-          category:
-            existing.category ||
-            normalizeText(
-              tool?.category || tool?.subcategory || tool?.tool_category || tool?.product_category,
-            ) ||
-            undefined,
-          source:
-            existing.source ||
-            normalizeText(tool?.source || tool?.retailer || tool?.merchant || 'matey_session_suggestion') ||
-            'matey_session_suggestion',
-          originalPhrase:
-            existing.originalPhrase ||
-            normalizeText(
-              tool?.originalPhrase || tool?.display_name || tool?.product_name || tool?.name || tool?.title,
-            ) ||
-            candidateName,
-        });
-      }
-    }
-    return Array.from(toolsByName.values());
-  };
-
-  const mergeToolSnapshots = (shedTools = [], suggestedTools = []) => {
-    const merged = new Map();
-    for (const tool of [...suggestedTools, ...shedTools]) {
-      const name = normalizeText(tool?.name);
-      if (!name) continue;
-      const key = normalizeToolKey(name);
-      if (!key) continue;
-      const existing = merged.get(key) || {};
-      merged.set(key, {
-        name: existing.name || name,
-        category: existing.category || normalizeText(tool?.category) || undefined,
-        source: existing.source || normalizeText(tool?.source) || undefined,
-        originalPhrase: existing.originalPhrase || normalizeText(tool?.originalPhrase) || undefined,
+      const jobNameFromRequest =
+        typeof req.query.jobName === 'string' ? req.query.jobName : undefined;
+      const payload = await computeSaveReadiness(sessionDoc, {
+        messagesJobStorage,
+        jobNameFromRequest,
       });
+      return res.json({ success: true, sessionId, ...payload });
+    } catch (err) {
+      console.error('GET /jobs/save-readiness error:', err);
+      return res.status(500).json({ error: 'Failed to evaluate save readiness' });
     }
-    return Array.from(merged.values());
-  };
-
-  const inferBudgetTier = (jobState = {}, existingBudgetTier = null) => {
-    const decisionEntries = Array.isArray(jobState?.decisionLog) ? jobState.decisionLog : [];
-    const budgetDecision = decisionEntries
-      .slice()
-      .reverse()
-      .find((entry) => entry?.key === 'budgetTier' && entry?.value !== undefined && entry?.value !== null);
-    const rawBudgetTier = normalizeText(budgetDecision?.value || existingBudgetTier);
-    if (!rawBudgetTier && jobState?.savedShoppingList?.estimatedSpendByBudgetTier) {
-      return 'mid';
-    }
-    const lowered = rawBudgetTier.toLowerCase();
-    if (['low', 'good', 'budget'].includes(lowered)) return 'low';
-    if (['mid', 'medium', 'better'].includes(lowered)) return 'mid';
-    if (['high', 'best', 'premium'].includes(lowered)) return 'high';
-    return rawBudgetTier || null;
-  };
-
-  const buildSyncedSavedJobFields = async ({ sourceSessionId, sessionDoc, userId, userEmail, existingJob }) => {
-    const resolvedSessionDoc =
-      sessionDoc || (sourceSessionId ? await mateyChatSessionsStorage.findOne({ sessionId: sourceSessionId }) : null);
-    const jobState = resolvedSessionDoc?.jobState || existingJob?.jobState || {};
-    const shortlistPlan = buildShortlistFromJobState(jobState);
-    const nextSteps = buildNextStepsFromJobState(jobState);
-    const [imageRefs, shedTools, suggestedTools] = await Promise.all([
-      collectImageRefsFromSession(sourceSessionId),
-      snapshotShedTools(userId, userEmail),
-      collectSuggestedToolsFromSession(sourceSessionId),
-    ]);
-    const ownedToolsSnapshot = mergeToolSnapshots(shedTools, suggestedTools);
-    return {
-      jobSummary: jobState?.stageTracker?.lastRecommendation || existingJob?.jobSummary || '',
-      jobStatus: jobState?.stageTracker?.currentStage || existingJob?.jobStatus || 'planning',
-      shortlistPlan,
-      nextSteps,
-      ownedToolsSnapshot,
-      imageRefs,
-      budgetTier: inferBudgetTier(jobState, existingJob?.budgetTier || null),
-      jobState,
-    };
-  };
-
-  const syncSavedJobFromSourceSession = async ({ jobDoc, userId, userEmail, touchTimestamps = false }) => {
-    if (!jobDoc?.sourceSessionId) return jobDoc;
-    const sessionDoc = await mateyChatSessionsStorage.findOne({ sessionId: jobDoc.sourceSessionId });
-    const syncedFields = await buildSyncedSavedJobFields({
-      sourceSessionId: jobDoc.sourceSessionId,
-      sessionDoc,
-      userId: userId || jobDoc.userId,
-      userEmail: userEmail || jobDoc.userEmail,
-      existingJob: jobDoc,
-    });
-    const setFields = touchTimestamps ?
-      {
-        ...syncedFields,
-        updatedAt: new Date(),
-        lastActivityAt: new Date(),
-      }
-    : syncedFields;
-    await savedJobsStorage.updateOne({ jobId: jobDoc.jobId }, { $set: setFields });
-    return { ...jobDoc, ...setFields };
-  };
+  });
 
   router.post('/jobs/save', requireAuth, async (req, res) => {
     try {
@@ -344,30 +175,57 @@ module.exports = ({
       if (!sessionDoc) {
         return res.status(404).json({ error: 'Source session not found' });
       }
-      // Ownership: must own the chat session before promoting it to a saved job.
-      if (
-        (sessionDoc.userId && sessionDoc.userId !== authUser.userId) &&
-        (sessionDoc.userEmail && sessionDoc.userEmail !== authUser.userEmail)
-      ) {
+      if (!ownsChatSession(sessionDoc, authUser)) {
         return res.status(403).json({ error: 'Forbidden: cannot save a session you do not own' });
       }
 
-      // Reuse the existing draft if this session was already saved (simple
-      // dedupe — users hitting Save twice should not get two SavedJobs).
-      const existing = await savedJobsStorage.findOne({
-        sourceSessionId,
-        userId: authUser.userId,
-        deletedAt: { $in: [null, undefined] },
+      const draftCheck = await isMeaningfulDraftFromSession(sessionDoc, {
+        messagesJobStorage,
+        jobNameFromRequest: jobName,
       });
+      if (!draftCheck.ok) {
+        return res.status(422).json({
+          error: 'Chat is not meaningful enough to save yet',
+          code: 'meaningful_draft_required',
+        });
+      }
+
+      const existingFilter = {
+        sourceSessionId,
+        deletedAt: { $in: [null, undefined] },
+        $or: [],
+      };
+      if (authUser.userId) existingFilter.$or.push({ userId: authUser.userId });
+      if (authUser.userEmail) existingFilter.$or.push({ userEmail: authUser.userEmail });
+      if (existingFilter.$or.length === 0) {
+        return res.status(400).json({ error: 'User identity incomplete' });
+      }
+      const existing = await savedJobsStorage.findOne(existingFilter);
+      if (existing && !ownsSavedJob(existing, authUser)) {
+        return res.status(404).json({ error: 'Not found' });
+      }
+
+      if (existing && existing.lockState === 'unlocked' && existing.snapshotFrozenAt) {
+        const user = await usersStorage.findOne({ userEmail: authUser.userEmail });
+        const activePasses = await loadActivePassesForUser(authUser.userId, authUser.userEmail);
+        const ent = getJobEntitlement({ savedJob: existing, user, activePasses });
+        return res.json({ success: true, job: jobToClientShape(existing, ent), frozen: true });
+      }
 
       const now = new Date();
-      const syncedFields = await buildSyncedSavedJobFields({
+      const snapshotPayload = await snap.buildSnapshotFromSession({
         sourceSessionId,
         sessionDoc,
         userId: authUser.userId,
         userEmail: authUser.userEmail,
         existingJob: existing || null,
+        snapshotCreatedReason: 'save',
       });
+
+      const draftSnapshotFields = {
+        ...snapshotPayload,
+        snapshotFrozenAt: null,
+      };
 
       if (existing) {
         await savedJobsStorage.updateOne(
@@ -376,7 +234,7 @@ module.exports = ({
             $set: {
               jobName: (isString(jobName) && jobName.trim()) || existing.jobName,
               jobType: (isString(jobType) && jobType.trim()) || existing.jobType,
-              ...syncedFields,
+              ...draftSnapshotFields,
               updatedAt: now,
               lastActivityAt: now,
             },
@@ -409,7 +267,7 @@ module.exports = ({
         jobName: (isString(jobName) && jobName.trim()) || sessionDoc.title || 'New saved job',
         jobType: (isString(jobType) && jobType.trim()) || null,
         sourceSessionId,
-        ...syncedFields,
+        ...draftSnapshotFields,
         lockState: 'draft',
         unlockType: 'none',
         passId: null,
@@ -425,7 +283,6 @@ module.exports = ({
       };
       await savedJobsStorage.insertOne(newDoc);
 
-      // Stamp the source session so the chat UI can show "Saved as: …".
       await mateyChatSessionsStorage.updateOne(
         { sessionId: sourceSessionId },
         { $set: { savedJobId: jobId, savedJobAt: now } },
@@ -481,20 +338,10 @@ module.exports = ({
       if (filter.$or.length === 0) return res.json({ success: true, jobs: [] });
 
       const docs = await savedJobsStorage.find(filter).sort({ updatedAt: -1 }).limit(limit).toArray();
-      const syncedDocs = await Promise.all(
-        docs.map((doc) =>
-          syncSavedJobFromSourceSession({
-            jobDoc: doc,
-            userId: authUser.userId,
-            userEmail: authUser.userEmail,
-            touchTimestamps: false,
-          }),
-        ),
-      );
       const user = await usersStorage.findOne({ userEmail: authUser.userEmail });
       const activePasses = await loadActivePassesForUser(authUser.userId, authUser.userEmail);
 
-      const jobs = syncedDocs.map((doc) => {
+      const jobs = docs.map((doc) => {
         const ent = getJobEntitlement({ savedJob: doc, user, activePasses });
         return jobToClientShape(doc, ent);
       });
@@ -513,17 +360,10 @@ module.exports = ({
     try {
       const authUser = req.authUser;
       if (!authUser?.userId) return res.status(401).json({ error: 'Unauthorized' });
-      let doc = await savedJobsStorage.findOne({ jobId: req.params.jobId });
-      if (!doc) return res.status(404).json({ error: 'Not found' });
-      if (doc.userId && doc.userId !== authUser.userId) {
-        return res.status(403).json({ error: 'Forbidden' });
+      const doc = await savedJobsStorage.findOne({ jobId: req.params.jobId });
+      if (!doc || !ownsSavedJob(doc, authUser)) {
+        return res.status(404).json({ error: 'Not found' });
       }
-      doc = await syncSavedJobFromSourceSession({
-        jobDoc: doc,
-        userId: authUser.userId,
-        userEmail: authUser.userEmail,
-        touchTimestamps: false,
-      });
       const user = await usersStorage.findOne({ userEmail: authUser.userEmail });
       const activePasses = await loadActivePassesForUser(authUser.userId, authUser.userEmail);
       const ent = getJobEntitlement({ savedJob: doc, user, activePasses });
@@ -542,17 +382,10 @@ module.exports = ({
     try {
       const authUser = req.authUser;
       if (!authUser?.userId) return res.status(401).json({ error: 'Unauthorized' });
-      let doc = await savedJobsStorage.findOne({ jobId: req.params.jobId });
-      if (!doc) return res.status(404).json({ error: 'Not found' });
-      if (doc.userId && doc.userId !== authUser.userId) {
-        return res.status(403).json({ error: 'Forbidden' });
+      const doc = await savedJobsStorage.findOne({ jobId: req.params.jobId });
+      if (!doc || !ownsSavedJob(doc, authUser)) {
+        return res.status(404).json({ error: 'Not found' });
       }
-      doc = await syncSavedJobFromSourceSession({
-        jobDoc: doc,
-        userId: authUser.userId,
-        userEmail: authUser.userEmail,
-        touchTimestamps: false,
-      });
       const user = await usersStorage.findOne({ userEmail: authUser.userEmail });
       const activePasses = await loadActivePassesForUser(authUser.userId, authUser.userEmail);
       const ent = getJobEntitlement({ savedJob: doc, user, activePasses });
@@ -560,7 +393,11 @@ module.exports = ({
         return res.status(402).json({ error: 'This job is locked. Save & unlock to edit.' });
       }
       const allowed = ['jobName', 'jobType', 'jobSummary', 'jobStatus', 'nextSteps', 'budgetTier', 'shortlistPlan'];
-      const update = { updatedAt: new Date(), lastActivityAt: new Date() };
+      const update = {
+        updatedAt: new Date(),
+        lastActivityAt: new Date(),
+        snapshotCreatedReason: 'explicit_edit',
+      };
       for (const k of allowed) {
         if (k in (req.body || {})) {
           update[k] = req.body[k];
@@ -580,17 +417,10 @@ module.exports = ({
     try {
       const authUser = req.authUser;
       if (!authUser?.userId) return res.status(401).json({ error: 'Unauthorized' });
-      let doc = await savedJobsStorage.findOne({ jobId: req.params.jobId });
-      if (!doc) return res.status(404).json({ error: 'Not found' });
-      if (doc.userId && doc.userId !== authUser.userId) {
-        return res.status(403).json({ error: 'Forbidden' });
+      const doc = await savedJobsStorage.findOne({ jobId: req.params.jobId });
+      if (!doc || !ownsSavedJob(doc, authUser)) {
+        return res.status(404).json({ error: 'Not found' });
       }
-      doc = await syncSavedJobFromSourceSession({
-        jobDoc: doc,
-        userId: authUser.userId,
-        userEmail: authUser.userEmail,
-        touchTimestamps: true,
-      });
       const user = await usersStorage.findOne({ userEmail: authUser.userEmail });
       const activePasses = await loadActivePassesForUser(authUser.userId, authUser.userEmail);
       const ent = getJobEntitlement({ savedJob: doc, user, activePasses });
@@ -606,8 +436,6 @@ module.exports = ({
           $set: { lastResumedAt: now, lastActivityAt: now, updatedAt: now },
         },
       );
-      // Bonus retention metric: if the user is coming back after >24h, fire
-      // `paid_job_returned_later` so the funnel can split by recency bucket.
       if (offerAnalyticsStorage) {
         await offerAnalyticsStorage.insertOne({
           eventName: 'job_resumed',
@@ -653,9 +481,8 @@ module.exports = ({
       const authUser = req.authUser;
       if (!authUser?.userId) return res.status(401).json({ error: 'Unauthorized' });
       const doc = await savedJobsStorage.findOne({ jobId: req.params.jobId });
-      if (!doc) return res.status(404).json({ error: 'Not found' });
-      if (doc.userId && doc.userId !== authUser.userId) {
-        return res.status(403).json({ error: 'Forbidden' });
+      if (!doc || !ownsSavedJob(doc, authUser)) {
+        return res.status(404).json({ error: 'Not found' });
       }
       if (doc.lockState === 'unlocked') {
         const u = await usersStorage.findOne({ userEmail: authUser.userEmail });
@@ -668,7 +495,6 @@ module.exports = ({
         authUser.userEmail,
         doc.jobId,
       );
-      // Optional: caller can pin a specific pass; otherwise we use FIFO.
       const requestedPassId = req.body?.passId || null;
       let consumed = null;
 
@@ -692,11 +518,19 @@ module.exports = ({
       const passIdForSavedJob = await resolveSavedJobPassBinding(doc.jobId, consumed.passId);
       const updatedJob = await unlockSavedJob({
         savedJobsStorage,
-        jobId: doc.jobId,
+        jobDoc: doc,
         passId: passIdForSavedJob,
         paymentProvider: consumed.paymentProvider,
         paymentId: consumed.providerPaymentId,
+        mateyChatSessionsStorage,
+        messagesJobStorage,
+        shedToolsStorage,
+        freezeReason: 'job_pass_unlock',
       });
+      if (!updatedJob) {
+        console.error('POST /jobs/:jobId/unlock: unlockSavedJob returned null after pass consume', doc.jobId);
+        return res.status(500).json({ error: 'Failed to unlock job; support has been notified' });
+      }
       if (offerAnalyticsStorage) {
         await offerAnalyticsStorage.insertOne({
           eventName: 'job_unlocked_with_existing_pass',
@@ -723,9 +557,8 @@ module.exports = ({
       const authUser = req.authUser;
       if (!authUser?.userId) return res.status(401).json({ error: 'Unauthorized' });
       const doc = await savedJobsStorage.findOne({ jobId: req.params.jobId });
-      if (!doc) return res.status(404).json({ error: 'Not found' });
-      if (doc.userId && doc.userId !== authUser.userId) {
-        return res.status(403).json({ error: 'Forbidden' });
+      if (!doc || !ownsSavedJob(doc, authUser)) {
+        return res.status(404).json({ error: 'Not found' });
       }
       const now = new Date();
       await savedJobsStorage.updateOne(
