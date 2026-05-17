@@ -35,9 +35,9 @@ class AuditLogger {
       };
 
       await this.auditLogsStorage.insertOne(auditEntry);
-      console.log(`✅ Audit logged: ${action} on ${resource} by ${userEmail || 'system'}`);
+      console.log(`Audit logged: ${action} on ${resource} by ${userEmail || 'system'}`);
     } catch (error) {
-      console.error('❌ Failed to log audit entry:', error);
+      console.error('Failed to log audit entry:', error);
     }
   }
 
@@ -263,10 +263,10 @@ class AuditLogger {
       const result = await this.auditLogsStorage.deleteMany({
         timestamp: { $lt: cutoffDate },
       });
-      console.log(`🧹 Cleaned up ${result.deletedCount} old audit logs`);
+      console.log(`Cleaned up ${result.deletedCount} old audit logs`);
       return result.deletedCount;
     } catch (error) {
-      console.error('❌ Failed to cleanup old audit logs:', error);
+      console.error('Failed to cleanup old audit logs:', error);
       throw error;
     }
   }

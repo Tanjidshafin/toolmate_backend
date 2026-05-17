@@ -551,7 +551,7 @@ class EmailService {
   }
 
   async sendSystemAlertEmail(userEmail, userName, alertType, message) {
-    console.log('📧 Sending system alert email:', alertType, 'to:', userEmail);
+    console.log('Sending system alert email:', alertType, 'to:', userEmail);
       const subjectMap = {
         account_banned: 'Account Suspended',
         account_unbanned: 'Account Reactivated',

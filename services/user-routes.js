@@ -225,7 +225,7 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
                 emailAddress: userEmail,
                 verified: true,
               })
-              console.log("✅ New email address created:", newEmailAddress.id)
+              console.log("New email address created:", newEmailAddress.id)
               await clerkClient.users.updateUser(clerkId, {
                 primaryEmailAddressId: newEmailAddress.id,
               })
@@ -234,9 +234,9 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
                 if (oldEmail.id !== newEmailAddress.id) {
                   try {
                     await clerkClient.emailAddresses.deleteEmailAddress(oldEmail.id)
-                    console.log("🗑️ Deleted old email address:", oldEmail.emailAddress)
+                    console.log("Deleted old email address:", oldEmail.emailAddress)
                   } catch (deleteError) {
-                    console.warn("⚠️ Could not delete old email:", deleteError.message)
+                    console.warn("Could not delete old email:", deleteError.message)
                   }
                 }
               }
@@ -270,7 +270,7 @@ module.exports = ({ usersStorage, clerkClient, emailTriggers, auditLogger, getUs
             }
           }
           if (isBanned !== undefined) {
-            console.log("🚫 Attempting ban status update to:", isBanned)
+            console.log("Attempting ban status update to:", isBanned)
             try {
               await clerkClient.users.updateUser(clerkId, {
                 banned: isBanned,

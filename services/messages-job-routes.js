@@ -1005,7 +1005,7 @@ module.exports = ({
   router.patch('/chat/sessions/:sessionId/shopping-list', requireAuth, async (req, res) => {
     try {
       const { sessionId } = req.params;
-      const { action, item, status, category } = req.body || {};
+      const { action, item, status, category, reason } = req.body || {};
       if (!sessionId || typeof sessionId !== 'string') {
         return res.status(400).json({ error: 'sessionId is required' });
       }
@@ -1029,14 +1029,16 @@ module.exports = ({
       if (action === 'remove') {
         nextItems = nextItems.filter((entry) => entry.item.toLowerCase() !== normalizedItem.toLowerCase());
       } else if (action === 'upsert' && normalizedItem) {
-        const nextStatus = normalizeText(status) || 'must_buy';
+        let nextStatus = normalizeText(status) || 'must_buy';
+        if (nextStatus === 'safety_ppe') nextStatus = 'safety';
         const nextCategory = normalizeText(category) || inferShoppingCategory(normalizedItem);
+        const reasonFromUser = normalizeText(reason);
         nextItems = mergeShoppingItems(nextItems, [
           {
             item: normalizedItem,
             status: nextStatus,
             category: nextCategory,
-            reason: 'Updated by user',
+            reason: reasonFromUser || 'Updated by user',
           },
         ]);
       } else if (action === 'mark_owned' && normalizedItem) {
