@@ -7,6 +7,7 @@ const {
   mergeShoppingItems,
   projectShoppingItemsToLists,
   reconstructShoppingItemsFromSavedList,
+  buildShoppingItemsFromAssistant,
 } = require('../messages-job-helpers');
 
 describe('canonicalizeShoppingItem (shed dedupe)', () => {
@@ -100,5 +101,52 @@ describe('shopping list ownership merge', () => {
     const drillCount = names.filter((name) => name === 'drill').length;
     assert.equal(drillCount, 1);
     assert.ok(names.includes('hammer drill'));
+  });
+});
+
+describe('user shopping overrides', () => {
+  it('keeps already_owned when Matey says you need a drill', () => {
+    const previous = [
+      {
+        item: 'drill',
+        status: 'already_owned',
+        reason: 'Updated by user',
+        userOverrides: { status: true, reason: true },
+      },
+    ];
+    const next = buildShoppingItemsFromAssistant(
+      "You'll need a drill for this job — grab one from the store.",
+      previous,
+      {},
+    );
+    const drill = next.find((row) => row.item === 'drill');
+    assert.ok(drill);
+    assert.equal(drill.status, 'already_owned');
+    assert.equal(drill.reason, 'Updated by user');
+    assert.equal(drill.userOverrides?.status, true);
+  });
+
+  it('does not re-add items the user removed', () => {
+    const next = buildShoppingItemsFromAssistant(
+      'Pick up screws and a drill while you are there.',
+      [],
+      { userRemovedItems: ['drill'] },
+    );
+    assert.equal(next.some((row) => row.item === 'drill'), false);
+    assert.ok(next.some((row) => row.item === 'screws'));
+  });
+
+  it('preserves user note when Matey re-mentions item without status lock', () => {
+    const previous = [
+      {
+        item: 'screws',
+        status: 'must_buy',
+        reason: 'For the bracket',
+        userOverrides: { reason: true },
+      },
+    ];
+    const next = buildShoppingItemsFromAssistant('You will need screws for the fix.', previous, {});
+    const row = next.find((entry) => entry.item === 'screws');
+    assert.equal(row?.reason, 'For the bracket');
   });
 });

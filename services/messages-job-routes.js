@@ -14,6 +14,8 @@ const {
   reconstructShoppingItemsFromSavedList,
   canonicalizeShoppingItem,
   inferShoppingCategory,
+  buildShoppingItemsFromAssistant,
+  isDerivedShoppingReason,
   defaultSurfaceState,
   normalizeSurfaceStatePatch,
   mergeSurfaceEntry,
@@ -88,57 +90,6 @@ const DECISION_FIELD_LABELS = {
   ownedToolsConfirmed: 'Owned tools confirmed',
   measurementsConfirmed: 'Measurements confirmed',
 };
-const SHOPPING_ITEM_REGEX =
-  /\b(joint compound|plaster patch|taping knife|sandpaper|primer|safety specs|safety glasses|goggles|dust mask|p2 mask|gloves|respirator|drill|hammer drill|drill bits?|masonry bits?|screws?|wall plugs?|anchors?|adhesive|sealant|tape|filler|paint|caulk|blades?|ear protection|sanding block|adapter|attachment|extension cord|extension|charger|battery pack|battery)\b/gi;
-
-const inferShoppingStatus = (content, itemName) => {
-  const lowered = content.toLowerCase();
-  const item = itemName.toLowerCase();
-  const aroundItemRegex = new RegExp(`(.{0,40}${escapeRegex(item)}.{0,40})`, 'i');
-  const local = (lowered.match(aroundItemRegex)?.[0] || lowered).toLowerCase();
-  if (/\b(don['’]?t need|not needed|no need|won['’]?t need|skip|avoid buying)\b/.test(local)) return 'not_needed';
-  if (/\b(safety|ppe|goggles|mask|respirator|gloves|ear protection)\b/.test(item)) return 'safety';
-  if (/\b(hire|rent|borrow)\b/.test(local)) return 'hire_or_borrow';
-  if (/\b(optional|better option|worth upgrading|upgrade|cleaner finish)\b/.test(local)) return 'optional';
-  if (/\b(consumable|single use|used up)\b/.test(local)) return 'consumable';
-  if (/\b(you(?:'| wi)ll need|you need|grab|pick up|get|use)\b/.test(local)) return 'must_buy';
-  return 'must_buy';
-};
-
-const buildShoppingItemsFromAssistant = (content, previousItems = []) => {
-  const source = typeof content === 'string' ? content : '';
-  if (!source.trim()) return normalizeArray(previousItems);
-  const nextByKey = new Map();
-  normalizeArray(previousItems).forEach((entry) => {
-    if (!entry || typeof entry !== 'object') return;
-    const item = canonicalizeShoppingItem(entry.item || entry.name || '');
-    if (!item) return;
-    nextByKey.set(item, {
-      item,
-      category: entry.category || inferShoppingCategory(item),
-      status: entry.status || 'must_buy',
-      reason: entry.reason || '',
-    });
-  });
-
-  const matches = source.match(SHOPPING_ITEM_REGEX) || [];
-  matches.forEach((rawMatch) => {
-    const item = canonicalizeShoppingItem(rawMatch);
-    if (!item) return;
-    const key = item;
-    const status = inferShoppingStatus(source, item);
-    const existing = nextByKey.get(key);
-    nextByKey.set(key, {
-      item: existing?.item || item,
-      category: existing?.category || inferShoppingCategory(item),
-      status,
-      reason: existing?.reason || 'Derived from assistant guidance',
-    });
-  });
-
-  return Array.from(nextByKey.values());
-};
-
 const toToolName = (tool) => {
   if (typeof tool === 'string') return tool.trim();
   if (!tool || typeof tool !== 'object') return '';
@@ -306,7 +257,11 @@ const buildDerivedJobState = ({
     if (explicitItems.length > 0) return explicitItems;
     return reconstructShoppingItemsFromSavedList(previous.savedShoppingList || {});
   })();
-  const assistantDerivedItems = buildShoppingItemsFromAssistant(messageDoc.content, previousShoppingItems);
+  const assistantDerivedItems = buildShoppingItemsFromAssistant(
+    messageDoc.content,
+    previousShoppingItems,
+    previous.savedShoppingList || {},
+  );
   const mergedToolItems = [
     ...assistantDerivedItems,
     ...mustBuy.map((name) => ({ item: name, category: inferShoppingCategory(name), status: 'must_buy' })),
@@ -351,6 +306,7 @@ const buildDerivedJobState = ({
       hireOrBorrow: projectedShopping.hireOrBorrow,
       notNeeded: projectedShopping.notNeeded,
       items: uniqueMergedItems,
+      userRemovedItems: normalizeStringArray(previous.savedShoppingList?.userRemovedItems),
       estimatedSpendByBudgetTier: estimateSpendByBudgetTier(
         normalizeArray(messageDoc.suggestedTools),
         metadata.budget,
@@ -1025,30 +981,44 @@ module.exports = ({
       const existingItems = normalizeArray(savedShoppingList.items);
       const normalizedItem = canonicalizeShoppingItem(item);
       let nextItems = mergeShoppingItems(existingItems);
+      let userRemovedItems = normalizeStringArray(savedShoppingList.userRemovedItems).map((name) =>
+        canonicalizeShoppingItem(name),
+      ).filter(Boolean);
 
       if (action === 'remove') {
         nextItems = nextItems.filter((entry) => entry.item.toLowerCase() !== normalizedItem.toLowerCase());
+        if (normalizedItem && !userRemovedItems.includes(normalizedItem)) {
+          userRemovedItems = [...userRemovedItems, normalizedItem];
+        }
       } else if (action === 'upsert' && normalizedItem) {
         let nextStatus = normalizeText(status) || 'must_buy';
         if (nextStatus === 'safety_ppe') nextStatus = 'safety';
         const nextCategory = normalizeText(category) || inferShoppingCategory(normalizedItem);
         const reasonFromUser = normalizeText(reason);
+        const userOverrides = { status: true };
+        if (reasonFromUser && !isDerivedShoppingReason(reasonFromUser)) {
+          userOverrides.reason = true;
+        }
+        userRemovedItems = userRemovedItems.filter((key) => key !== normalizedItem);
         nextItems = mergeShoppingItems(nextItems, [
           {
             item: normalizedItem,
             status: nextStatus,
             category: nextCategory,
             reason: reasonFromUser || 'Updated by user',
+            userOverrides,
           },
         ]);
       } else if (action === 'mark_owned' && normalizedItem) {
         const nextCategory = normalizeText(category) || inferShoppingCategory(normalizedItem);
+        userRemovedItems = userRemovedItems.filter((key) => key !== normalizedItem);
         nextItems = mergeShoppingItems(nextItems, [
           {
             item: normalizedItem,
             status: 'already_owned',
             category: nextCategory,
             reason: 'Marked owned by user',
+            userOverrides: { status: true, reason: true },
           },
         ]);
       } else {
@@ -1068,6 +1038,7 @@ module.exports = ({
           hireOrBorrow: projected.hireOrBorrow,
           notNeeded: projected.notNeeded,
           items: nextItems,
+          userRemovedItems,
         },
         updatedAt: new Date(),
       };

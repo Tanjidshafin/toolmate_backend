@@ -120,6 +120,7 @@ let testimonialsStorage;
 let savedJobsStorage;
 let jobPassesStorage;
 let offerAnalyticsStorage;
+let draftTelemetryStorage;
 let emailService;
 let emailTriggers;
 let auditLogger;
@@ -161,6 +162,7 @@ async function run() {
     savedJobsStorage = client.db('Toolmate').collection('SavedJobs');
     jobPassesStorage = client.db('Toolmate').collection('JobPasses');
     offerAnalyticsStorage = client.db('Toolmate').collection('OfferAnalytics');
+    draftTelemetryStorage = client.db('Toolmate').collection('DraftTelemetry');
 
     // Reconcile MessagesJob idempotency index. Older deployments created a unique sparse index
     // on (sessionId, clientMessageId) with the default name "sessionId_1_clientMessageId_1".
@@ -762,6 +764,7 @@ async function run() {
       savedJobsStorage,
       jobPassesStorage,
       offerAnalyticsStorage,
+      draftTelemetryStorage,
     };
     app.get('/', (req, res) => {
       res.send('Welcome to Toolmate');

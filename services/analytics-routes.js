@@ -8,6 +8,7 @@ module.exports = ({
   redirectTrackingStorage,
   mateyChatSessionsStorage,
   messagesJobStorage,
+  draftTelemetryStorage,
 }) => {
   const router = express.Router()
   const hasActiveSubscriptionStatus = (user) => {
@@ -126,6 +127,36 @@ module.exports = ({
     } catch (error) {
       console.error("Error fetching analytics:", error)
       res.status(500).json({ error: "Failed to fetch analytics" })
+    }
+  })
+
+  /** Best-effort client draft / funnel events (separate from admin dashboard aggregates). */
+  router.post("/track-analytics", async (req, res) => {
+    try {
+      if (!draftTelemetryStorage) {
+        return res.status(503).json({ ok: false, error: "telemetry store unavailable" })
+      }
+      const body = req.body || {}
+      const eventType = typeof body.eventType === "string" ? body.eventType.trim() : ""
+      if (!eventType) {
+        return res.status(400).json({ ok: false, error: "eventType required" })
+      }
+      await draftTelemetryStorage.insertOne({
+        eventType,
+        userId: body.userId ?? null,
+        userEmail: body.userEmail ?? null,
+        sessionId: body.sessionId ?? null,
+        placement: body.placement ?? null,
+        shoppingListCount: body.shoppingListCount ?? null,
+        chipText: body.chipText ?? null,
+        item: body.item ?? null,
+        action: body.action ?? null,
+        createdAt: new Date(),
+      })
+      return res.status(204).end()
+    } catch (error) {
+      console.error("track-analytics:", error?.message || error)
+      return res.status(500).json({ ok: false })
     }
   })
 
