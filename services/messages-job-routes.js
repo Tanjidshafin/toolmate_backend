@@ -24,15 +24,7 @@ const {
 const hasMessageContent = (value) => typeof value === 'string' && value.trim().length > 0;
 const isMeaningfulText = (value) => typeof value === 'string' && value.trim().length > 8;
 
-const buildSessionTitle = (content) => {
-  if (!isMeaningfulText(content)) {
-    return null;
-  }
-  const sanitized = content.replace(/\s+/g, ' ').trim();
-  const firstSentence = sanitized.split(/[.!?\n]/)[0]?.trim();
-  const titleSource = firstSentence || sanitized;
-  return titleSource.slice(0, 80);
-};
+const { buildSessionTitle } = require('./session-title');
 
 const normalizeRole = (role) => {
   if (role === 'matey' || role === 'assistant') {
@@ -554,6 +546,7 @@ module.exports = ({
     const { sessionId } = messageDoc;
     const now = messageDoc.createdAt;
     const incomingTitle = sessionDelta.titleCandidate;
+    const incomingTitleSource = sessionDelta.titleSource || null;
     const totalSuggestedToolsIncrement = normalizeArray(messageDoc.suggestedTools).length;
     const imageAttachmentsInc = normalizeArray(messageDoc.images).length;
     const sessionCountersInc = {
@@ -598,9 +591,13 @@ module.exports = ({
       sessionUpdate.$set.jobState = sessionDelta.jobState;
     }
     if (incomingTitle) {
+      const titleSet = { title: incomingTitle };
+      if (incomingTitleSource) {
+        titleSet.titleSource = incomingTitleSource;
+      }
       await mateyChatSessionsStorage.updateOne(
         { sessionId, title: DEFAULT_TITLE },
-        { $set: { title: incomingTitle } },
+        { $set: titleSet },
       );
     }
     if (supportsTransactions()) {
@@ -788,7 +785,8 @@ module.exports = ({
         updatedAt: now,
       };
 
-      const titleCandidate = normalizedRole === 'matey' ? buildSessionTitle(content) : null;
+      const titleCandidate = normalizedRole === 'user' ? buildSessionTitle(content) : null;
+      const titleSource = titleCandidate ? 'user_message' : null;
 
       let insertResult;
       try {
@@ -799,6 +797,7 @@ module.exports = ({
             userEmail: verifiedUserEmail,
             userName,
             titleCandidate,
+            titleSource,
             ...(shouldDeriveJobState ? { jobState: derivedJobState } : {}),
           },
         });
@@ -1148,6 +1147,7 @@ module.exports = ({
         .project({
           sessionId: 1,
           title: 1,
+          titleSource: 1,
           messageCount: 1,
           userMessageCount: 1,
           mateyMessageCount: 1,
