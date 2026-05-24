@@ -278,6 +278,53 @@ module.exports = ({
     }
   });
 
+
+  router.get('/rag-system/brands', async (req, res) => {
+    try {
+      const rawBrands = await ragSystemStorage
+        .aggregate([
+          {
+            $match: {
+              hidden: { $ne: true },
+              brand: { $exists: true, $type: 'string', $nin: ['', null] },
+            },
+          },
+          {
+            $project: {
+              brand: { $trim: { input: '$brand' } },
+            },
+          },
+          { $match: { brand: { $ne: '' } } },
+          { $group: { _id: '$brand' } },
+          { $sort: { _id: 1 } },
+        ])
+        .toArray();
+
+      const seenLower = new Map();
+      for (const row of rawBrands) {
+        const name = typeof row._id === 'string' ? row._id.trim() : '';
+        if (!name) continue;
+        const key = name.toLowerCase();
+        const existing = seenLower.get(key);
+        if (!existing || name.length > existing.length) {
+          seenLower.set(key, name);
+        }
+      }
+
+      const brands = [...seenLower.values()].sort((a, b) => b.length - a.length);
+
+      res.set('Cache-Control', 'public, max-age=3600');
+      res.json({
+        brands,
+        count: brands.length,
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      console.error('Error fetching RAG brands:', error);
+      res.status(500).json({ error: 'Failed to fetch RAG brands' });
+    }
+  });
+
   router.get('/rag-system/filtered-tools', async (req, res) => {
     try {
       const { risk_level, productNames, userID, lat, lon } = req.query;
